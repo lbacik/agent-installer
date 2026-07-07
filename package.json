@@ -8,7 +8,7 @@
     "README.md"
   ],
   "bin": {
-    "agent-installer": "./dist/cli.js"
+    "agent-installer": "dist/cli.js"
   },
   "scripts": {
     "build": "tsup",
