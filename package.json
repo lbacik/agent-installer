@@ -1,17 +1,30 @@
 {
-  "name": "ai-skill-installer",
+  "name": "agent-installer",
   "version": "0.1.0",
   "description": "Install Codex skills and Claude Code skills and commands from a local repository.",
   "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "bin": {
     "agent-installer": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsup",
+    "prepare": "pnpm build",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lbacik/agent-installer.git"
+  },
+  "homepage": "https://github.com/lbacik/agent-installer",
+  "bugs": {
+    "url": "https://github.com/lbacik/agent-installer/issues"
   },
   "engines": {
     "node": ">=20"

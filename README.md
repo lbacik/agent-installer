@@ -42,7 +42,19 @@ Rules:
 
 ## Installation
 
-Install dependencies:
+Install directly from GitHub:
+
+```bash
+pnpm add -g github:lbacik/agent-installer
+```
+
+Or with npm:
+
+```bash
+npm install -g github:lbacik/agent-installer
+```
+
+For local development, install dependencies:
 
 ```bash
 pnpm install
