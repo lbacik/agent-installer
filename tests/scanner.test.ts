@@ -32,6 +32,29 @@ describe("scanSourceRepository", () => {
     ]);
   });
 
+  it("discovers skills nested below skills up to the default max depth", async () => {
+    const repo = await makeRepo();
+    await fs.mkdir(path.join(repo, "skills", "engineering", "code-review"), { recursive: true });
+    await fs.writeFile(path.join(repo, "skills", "engineering", "code-review", "SKILL.md"), "# Code Review\n", "utf8");
+
+    const result = await scanSourceRepository(repo);
+
+    expect(result).toEqual([
+      expect.objectContaining({ kind: "skill", name: "code-review", relativeSourcePath: "skills/engineering/code-review" })
+    ]);
+  });
+
+  it("ignores skills deeper than the configured max depth", async () => {
+    const repo = await makeRepo();
+    await fs.mkdir(path.join(repo, "skills", "one", "two", "three", "deep-skill"), { recursive: true });
+    await fs.writeFile(path.join(repo, "skills", "one", "two", "three", "deep-skill", "SKILL.md"), "# Deep\n", "utf8");
+
+    await expect(scanSourceRepository(repo)).resolves.toEqual([]);
+    await expect(scanSourceRepository(repo, { skillMaxDepth: 4 })).resolves.toEqual([
+      expect.objectContaining({ kind: "skill", name: "deep-skill", relativeSourcePath: "skills/one/two/three/deep-skill" })
+    ]);
+  });
+
   it("ignores skill folders without SKILL.md", async () => {
     const repo = await makeRepo();
     await fs.mkdir(path.join(repo, "skills", "draft"), { recursive: true });
@@ -49,5 +72,15 @@ describe("scanSourceRepository", () => {
     await fs.writeFile(path.join(repo, "commands", "foo.md"), "from commands\n", "utf8");
 
     await expect(scanSourceRepository(repo)).rejects.toThrow('Duplicate prompt or command name "foo"');
+  });
+
+  it("errors when recursive skill discovery finds duplicate skill names", async () => {
+    const repo = await makeRepo();
+    await fs.mkdir(path.join(repo, "skills", "engineering", "review"), { recursive: true });
+    await fs.mkdir(path.join(repo, "skills", "deprecated", "review"), { recursive: true });
+    await fs.writeFile(path.join(repo, "skills", "engineering", "review", "SKILL.md"), "# Review\n", "utf8");
+    await fs.writeFile(path.join(repo, "skills", "deprecated", "review", "SKILL.md"), "# Old Review\n", "utf8");
+
+    await expect(scanSourceRepository(repo)).rejects.toThrow('Duplicate skill name "review"');
   });
 });

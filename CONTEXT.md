@@ -9,7 +9,7 @@ A managed item discovered in a source repository and installed into local agent 
 _Avoid_: asset, package item
 
 **Skill**:
-A directory-based artifact whose entry point is `SKILL.md`.
+A directory-based artifact whose entry point is `SKILL.md`. The skill name is the basename of the directory that contains the entry point.
 _Avoid_: prompt pack, plugin
 
 **Prompt**:

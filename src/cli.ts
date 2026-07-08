@@ -8,7 +8,12 @@ import { promptForSelections } from "./interactive.js";
 import { resolveTargetPaths } from "./paths.js";
 import { scanSourceRepository } from "./source.js";
 import { loadState } from "./state.js";
-import { ArtifactState } from "./types.js";
+import type { ScanSourceOptions } from "./source.js";
+import type { ArtifactState } from "./types.js";
+
+interface ScanCommandOptions {
+  skillMaxDepth?: number;
+}
 
 function resolveSourcePath(inputPath?: string): string {
   return path.resolve(inputPath ?? process.cwd());
@@ -24,14 +29,35 @@ function toStateMap(states: ArtifactState[]): Map<string, ArtifactState> {
   return new Map(states.map((state) => [state.id, state]));
 }
 
-async function scanWithState(inputPath?: string, home?: string) {
+function parsePositiveInteger(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error("--skill-max-depth must be a positive integer.");
+  }
+
+  return parsed;
+}
+
+function scanOptionsFromCommand(options: ScanCommandOptions): ScanSourceOptions {
+  return options.skillMaxDepth === undefined ? {} : { skillMaxDepth: options.skillMaxDepth };
+}
+
+function addSkillMaxDepthOption(command: Command): Command {
+  return command.option(
+    "--skill-max-depth <depth>",
+    "Maximum directory depth to search below skills/ for SKILL.md",
+    parsePositiveInteger
+  );
+}
+
+async function scanWithState(inputPath?: string, home?: string, scanOptions?: ScanSourceOptions) {
   const sourcePath = resolveSourcePath(inputPath);
-  const artifacts = await scanSourceRepository(sourcePath);
+  const artifacts = await scanSourceRepository(sourcePath, scanOptions);
   return collectArtifactStates(artifacts, home, sourcePath);
 }
 
-async function runInteractive(inputPath?: string): Promise<void> {
-  const { states, removed } = await scanWithState(inputPath);
+async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOptions): Promise<void> {
+  const { states, removed } = await scanWithState(inputPath, undefined, scanOptions);
   printLines(states.map(formatArtifactLine));
   if (removed.length > 0) {
     printLines(removed.map(formatRemovedLine));
@@ -69,36 +95,34 @@ async function runInteractive(inputPath?: string): Promise<void> {
 
 function createProgram(): Command {
   const program = new Command();
-  program
+  addSkillMaxDepthOption(program)
     .name("agent-installer")
     .description("Install Codex skills and Claude Code skills and commands from a local repository.")
     .argument("[path]", "Source repository to scan", process.cwd())
-    .action(async (inputPath) => {
-      await runInteractive(inputPath);
+    .action(async (inputPath, options: ScanCommandOptions) => {
+      await runInteractive(inputPath, scanOptionsFromCommand(options));
     });
 
-  program
-    .command("scan")
+  addSkillMaxDepthOption(program.command("scan"))
     .argument("[path]", "Source repository to scan", process.cwd())
-    .action(async (inputPath) => {
-      const { states, removed } = await scanWithState(inputPath);
+    .action(async (inputPath, options: ScanCommandOptions) => {
+      const { states, removed } = await scanWithState(inputPath, undefined, scanOptionsFromCommand(options));
       printLines(states.map(formatArtifactLine));
       if (removed.length > 0) {
         printLines(removed.map(formatRemovedLine));
       }
     });
 
-  program
-    .command("install")
+  addSkillMaxDepthOption(program.command("install"))
     .description("Install or update all discovered artifacts from the source repository.")
     .argument("[path]", "Source repository to scan", process.cwd())
     .option("--all", "Install all discovered artifacts")
-    .action(async (inputPath, options: { all?: boolean }) => {
+    .action(async (inputPath, options: ScanCommandOptions & { all?: boolean }) => {
       if (!options.all) {
         throw new Error("Use --all for non-interactive installation.");
       }
 
-      const { states } = await scanWithState(inputPath);
+      const { states } = await scanWithState(inputPath, undefined, scanOptionsFromCommand(options));
       const installable = states.filter((state) => state.status === "new" || state.status === "installed-different");
       await installArtifacts(installable);
       console.log(`installed/updated ${installable.length}`);

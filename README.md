@@ -28,6 +28,9 @@ my-agent-repo/
   skills/
     review/
       SKILL.md
+    engineering/
+      code-review/
+        SKILL.md
   prompts/
     commit-message.md
   commands/
@@ -37,6 +40,9 @@ my-agent-repo/
 Rules:
 
 - a skill is valid only if its directory contains `SKILL.md`
+- skill directories may be nested below `skills/`; the default scan depth is 3 directory levels below `skills/`
+- a skill's install name is the basename of the directory containing `SKILL.md`
+- duplicate skill names are rejected, even if they appear in different nested categories
 - prompt and command files must be Markdown files
 - `prompts/foo.md` and `commands/foo.md` cannot both exist
 
@@ -98,6 +104,12 @@ Show scan results only:
 
 ```bash
 agent-installer scan [path]
+```
+
+Scan deeper nested skill catalogs:
+
+```bash
+agent-installer scan [path] --skill-max-depth 5
 ```
 
 Install or update everything found:

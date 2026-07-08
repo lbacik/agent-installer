@@ -2,6 +2,12 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { DiscoveredArtifact } from "./types.js";
 
+const DEFAULT_SKILL_MAX_DEPTH = 3;
+
+export interface ScanSourceOptions {
+  skillMaxDepth?: number;
+}
+
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
     await fs.access(targetPath);
@@ -11,31 +17,65 @@ async function pathExists(targetPath: string): Promise<boolean> {
   }
 }
 
-export async function scanSourceRepository(inputPath: string): Promise<DiscoveredArtifact[]> {
-  const sourceRoot = await fs.realpath(inputPath);
-  const artifacts: DiscoveredArtifact[] = [];
+function resolveSkillMaxDepth(options?: ScanSourceOptions): number {
+  return options?.skillMaxDepth ?? DEFAULT_SKILL_MAX_DEPTH;
+}
 
+async function discoverSkills(sourceRoot: string, maxDepth: number): Promise<DiscoveredArtifact[]> {
   const skillsDir = path.join(sourceRoot, "skills");
-  if (await pathExists(skillsDir)) {
-    const dirents = await fs.readdir(skillsDir, { withFileTypes: true });
-    for (const dirent of dirents) {
-      if (!dirent.isDirectory()) {
-        continue;
+  const skillsByName = new Map<string, DiscoveredArtifact>();
+
+  if (!(await pathExists(skillsDir)) || maxDepth < 1) {
+    return [];
+  }
+
+  async function visitDirectory(currentPath: string, depth: number): Promise<void> {
+    const entrypoint = path.join(currentPath, "SKILL.md");
+    if (await pathExists(entrypoint)) {
+      const name = path.basename(currentPath);
+      const existing = skillsByName.get(name);
+      if (existing) {
+        throw new Error(
+          `Duplicate skill name "${name}" found at "${existing.relativeSourcePath}" and "${path.relative(sourceRoot, currentPath)}".`
+        );
       }
 
-      const skillPath = path.join(skillsDir, dirent.name);
-      const entrypoint = path.join(skillPath, "SKILL.md");
-      if (await pathExists(entrypoint)) {
-        artifacts.push({
-          kind: "skill",
-          name: dirent.name,
-          sourceRoot,
-          sourcePath: skillPath,
-          relativeSourcePath: path.relative(sourceRoot, skillPath)
-        });
+      skillsByName.set(name, {
+        kind: "skill",
+        name,
+        sourceRoot,
+        sourcePath: currentPath,
+        relativeSourcePath: path.relative(sourceRoot, currentPath)
+      });
+    }
+
+    if (depth >= maxDepth) {
+      return;
+    }
+
+    const dirents = await fs.readdir(currentPath, { withFileTypes: true });
+    for (const dirent of dirents) {
+      if (dirent.isDirectory()) {
+        await visitDirectory(path.join(currentPath, dirent.name), depth + 1);
       }
     }
   }
+
+  const dirents = await fs.readdir(skillsDir, { withFileTypes: true });
+  for (const dirent of dirents) {
+    if (dirent.isDirectory()) {
+      await visitDirectory(path.join(skillsDir, dirent.name), 1);
+    }
+  }
+
+  return [...skillsByName.values()];
+}
+
+export async function scanSourceRepository(inputPath: string, options?: ScanSourceOptions): Promise<DiscoveredArtifact[]> {
+  const sourceRoot = await fs.realpath(inputPath);
+  const artifacts: DiscoveredArtifact[] = [];
+
+  artifacts.push(...(await discoverSkills(sourceRoot, resolveSkillMaxDepth(options))));
 
   const promptCandidates = new Map<string, DiscoveredArtifact>();
   for (const folder of ["prompts", "commands"]) {

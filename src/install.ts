@@ -3,6 +3,7 @@ import path from "node:path";
 import { hashArtifact } from "./hash.js";
 import { artifactId, getBasePath, getExposurePath, getMarkerPath, resolveTargetPaths, TargetPaths } from "./paths.js";
 import { loadState, saveState } from "./state.js";
+import type { ScanSourceOptions } from "./source.js";
 import { ArtifactState, DiscoveredArtifact, ManagedEntry, RemovedArtifactState } from "./types.js";
 
 async function pathExists(targetPath: string): Promise<boolean> {
@@ -207,9 +208,13 @@ export async function removeArtifacts(ids: string[], home?: string): Promise<Man
   return removed;
 }
 
-export async function installAllFromSource(sourcePath: string, home?: string): Promise<ArtifactState[]> {
+export async function installAllFromSource(
+  sourcePath: string,
+  home?: string,
+  scanOptions?: ScanSourceOptions
+): Promise<ArtifactState[]> {
   const { scanSourceRepository } = await import("./source.js");
-  const artifacts = await scanSourceRepository(sourcePath);
+  const artifacts = await scanSourceRepository(sourcePath, scanOptions);
   const { states } = await collectArtifactStates(artifacts, home, sourcePath);
   const installable = states.filter((state) => state.status === "new" || state.status === "installed-different");
   await installArtifacts(installable, home);
