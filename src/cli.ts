@@ -64,6 +64,11 @@ async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOption
   }
 
   const selection = await promptForSelections(states, removed);
+  if (selection.cancelled) {
+    console.log("No changes applied.");
+    return;
+  }
+
   const stateMap = toStateMap(states);
   const installTargets = selection.installIds.map((id) => {
     const state = stateMap.get(id);
