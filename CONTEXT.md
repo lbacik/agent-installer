@@ -35,3 +35,7 @@ _Avoid_: user file
 **Source Repository**:
 The local directory scanned for installable artifacts.
 _Avoid_: registry, remote package
+
+**Source Path**:
+The original path to an artifact inside its source repository, shown as the source repository plus the artifact's relative source path.
+_Avoid_: destination, install path

@@ -1,5 +1,6 @@
 import pc from "picocolors";
-import { ArtifactState, RemovedArtifactState } from "./types.js";
+import path from "node:path";
+import { ArtifactState, ManagedEntry, RemovedArtifactState } from "./types.js";
 
 function colorizeStatus(status: ArtifactState["status"] | RemovedArtifactState["status"]): string {
   switch (status) {
@@ -29,4 +30,8 @@ export function formatArtifactLine(state: ArtifactState): string {
 
 export function formatRemovedLine(state: RemovedArtifactState): string {
   return `${colorizeStatus(state.status)} ${state.id} <- missing from source`;
+}
+
+export function formatManagedEntryLine(entry: ManagedEntry): string {
+  return `${entry.id} -> ${path.join(entry.sourceRoot, entry.relativeSourcePath)}`;
 }

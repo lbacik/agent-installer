@@ -3,7 +3,7 @@
 import { Command } from "commander";
 import path from "node:path";
 import { collectArtifactStates, installArtifacts, removeArtifacts } from "./install.js";
-import { formatArtifactLine, formatRemovedLine } from "./format.js";
+import { formatArtifactLine, formatManagedEntryLine, formatRemovedLine } from "./format.js";
 import { promptForSelections } from "./interactive.js";
 import { resolveTargetPaths } from "./paths.js";
 import { scanSourceRepository } from "./source.js";
@@ -148,7 +148,7 @@ function createProgram(): Command {
       }
 
       for (const entry of state.entries) {
-        console.log(`${entry.id} -> ${entry.basePath}`);
+        console.log(formatManagedEntryLine(entry));
       }
     });
 
