@@ -3,7 +3,7 @@
 import { Command } from "commander";
 import path from "node:path";
 import { collectArtifactStates, installArtifacts, removeArtifacts } from "./install.js";
-import { formatArtifactLine, formatManagedEntryLine, formatRemovedLine } from "./format.js";
+import { formatArtifactLine, formatInteractiveStartupArtifactLines, formatManagedEntryLine, formatRemovedLine } from "./format.js";
 import { promptForSelections } from "./interactive.js";
 import { resolveTargetPaths } from "./paths.js";
 import { scanSourceRepository } from "./source.js";
@@ -58,7 +58,7 @@ async function scanWithState(inputPath?: string, home?: string, scanOptions?: Sc
 
 async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOptions): Promise<void> {
   const { states, removed } = await scanWithState(inputPath, undefined, scanOptions);
-  printLines(states.map(formatArtifactLine));
+  printLines(formatInteractiveStartupArtifactLines(states));
   if (removed.length > 0) {
     printLines(removed.map(formatRemovedLine));
   }

@@ -28,6 +28,10 @@ export function formatArtifactLine(state: ArtifactState): string {
   return `${colorizeStatus(state.status)} ${state.id} <- ${state.artifact.relativeSourcePath}${detail}`;
 }
 
+export function formatInteractiveStartupArtifactLines(states: ArtifactState[]): string[] {
+  return states.filter((state) => state.status === "conflict").map(formatArtifactLine);
+}
+
 export function formatRemovedLine(state: RemovedArtifactState): string {
   return `${colorizeStatus(state.status)} ${state.id} <- missing from source`;
 }
