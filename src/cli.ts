@@ -15,6 +15,10 @@ interface ScanCommandOptions {
   skillMaxDepth?: number;
 }
 
+interface InteractiveCommandOptions extends ScanCommandOptions {
+  listLength?: number;
+}
+
 function resolveSourcePath(inputPath?: string): string {
   return path.resolve(inputPath ?? process.cwd());
 }
@@ -29,10 +33,10 @@ function toStateMap(states: ArtifactState[]): Map<string, ArtifactState> {
   return new Map(states.map((state) => [state.id, state]));
 }
 
-function parsePositiveInteger(value: string): number {
+function parsePositiveInteger(value: string, optionName: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1) {
-    throw new Error("--skill-max-depth must be a positive integer.");
+    throw new Error(`${optionName} must be a positive integer.`);
   }
 
   return parsed;
@@ -46,7 +50,7 @@ function addSkillMaxDepthOption(command: Command): Command {
   return command.option(
     "--skill-max-depth <depth>",
     "Maximum directory depth to search below skills/ for SKILL.md",
-    parsePositiveInteger
+    (value) => parsePositiveInteger(value, "--skill-max-depth")
   );
 }
 
@@ -56,14 +60,14 @@ async function scanWithState(inputPath?: string, home?: string, scanOptions?: Sc
   return collectArtifactStates(artifacts, home, sourcePath);
 }
 
-async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOptions): Promise<void> {
+async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOptions, listLength?: number): Promise<void> {
   const { states, removed } = await scanWithState(inputPath, undefined, scanOptions);
   printLines(formatInteractiveStartupArtifactLines(states));
   if (removed.length > 0) {
     printLines(removed.map(formatRemovedLine));
   }
 
-  const selection = await promptForSelections(states, removed);
+  const selection = await promptForSelections(states, removed, listLength === undefined ? {} : { listLength });
   if (selection.cancelled) {
     console.log("No changes applied.");
     return;
@@ -104,8 +108,13 @@ function createProgram(): Command {
     .name("agent-installer")
     .description("Install Codex skills and Claude Code skills and commands from a local repository.")
     .argument("[path]", "Source repository to scan", process.cwd())
-    .action(async (inputPath, options: ScanCommandOptions) => {
-      await runInteractive(inputPath, scanOptionsFromCommand(options));
+    .option(
+      "--list-length <count>",
+      "Number of artifacts visible in the interactive selection list",
+      (value) => parsePositiveInteger(value, "--list-length")
+    )
+    .action(async (inputPath, options: InteractiveCommandOptions) => {
+      await runInteractive(inputPath, scanOptionsFromCommand(options), options.listLength);
     });
 
   addSkillMaxDepthOption(program.command("scan"))

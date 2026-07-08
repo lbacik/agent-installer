@@ -20,8 +20,41 @@ interface PromptContext {
   clearPromptOnDone?: boolean;
 }
 
+export interface PromptForSelectionsOptions extends PromptContext {
+  listLength?: number;
+}
+
+interface TerminalSizeOutput {
+  rows?: number;
+}
+
+const PROMPT_RESERVED_ROWS = 4;
+const FALLBACK_LIST_LENGTH = 7;
+
 function isPromptCancellation(error: unknown): boolean {
   return error instanceof Error && ["AbortPromptError", "CancelPromptError", "ExitPromptError"].includes(error.name);
+}
+
+function isEscapeKey(value: string, key: Key): boolean {
+  return key.name === "escape" || key.sequence === "\x1B" || value === "\x1B";
+}
+
+function listLengthFromTerminal(output: NodeJS.WritableStream): number | undefined {
+  const rows = (output as TerminalSizeOutput).rows;
+  if (rows === undefined) {
+    return undefined;
+  }
+
+  return Math.max(1, rows - PROMPT_RESERVED_ROWS);
+}
+
+function resolveListLength(choiceCount: number, requestedLength: number | undefined, output: NodeJS.WritableStream): number {
+  if (choiceCount < 1) {
+    return 1;
+  }
+
+  const availableLength = requestedLength ?? listLengthFromTerminal(output) ?? FALLBACK_LIST_LENGTH;
+  return Math.min(choiceCount, Math.max(1, availableLength));
 }
 
 async function withEscapeCancellation<T>(
@@ -30,8 +63,8 @@ async function withEscapeCancellation<T>(
 ): Promise<T> {
   const controller = new AbortController();
   const input = context.input ?? process.stdin;
-  const abortOnEscape = (_value: string, key: Key) => {
-    if (key.name === "escape") {
+  const abortOnEscape = (value: string, key: Key) => {
+    if (isEscapeKey(value, key)) {
       controller.abort("escape");
     }
   };
@@ -47,8 +80,10 @@ async function withEscapeCancellation<T>(
 export async function promptForSelections(
   states: ArtifactState[],
   removed: RemovedArtifactState[],
-  context: PromptContext = {}
+  context: PromptForSelectionsOptions = {}
 ): Promise<InteractiveResult> {
+  const output = context.output ?? process.stdout;
+  const listLength = resolveListLength(states.length, context.listLength, output);
   let currentSelections: Set<string>;
   try {
     currentSelections = new Set(
@@ -57,6 +92,8 @@ export async function promptForSelections(
           checkbox(
             {
               message: "Select artifacts that should remain installed",
+              pageSize: listLength,
+              loop: false,
               choices: states.map((state) => ({
                 name: `${state.id} [${state.status}]`,
                 value: state.id,

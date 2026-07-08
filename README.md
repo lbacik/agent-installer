@@ -100,6 +100,12 @@ Interactive install:
 agent-installer [path]
 ```
 
+Limit the visible interactive list length:
+
+```bash
+agent-installer [path] --list-length 12
+```
+
 Show scan results only:
 
 ```bash

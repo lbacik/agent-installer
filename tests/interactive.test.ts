@@ -106,12 +106,80 @@ describe("promptForSelections", () => {
     });
   });
 
+  it("disables list looping and uses the configured list length", async () => {
+    checkboxMock.mockImplementation(() => promptPromise(Promise.resolve([])));
+
+    await promptForSelections(
+      [
+        makeState("skill:one", "new"),
+        makeState("skill:two", "new"),
+        makeState("skill:three", "new"),
+        makeState("skill:four", "new")
+      ],
+      [],
+      { listLength: 2 }
+    );
+
+    expect(checkboxMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        loop: false,
+        pageSize: 2
+      }),
+      expect.any(Object)
+    );
+  });
+
+  it("uses the terminal height for the default list length", async () => {
+    checkboxMock.mockImplementation(() => promptPromise(Promise.resolve([])));
+
+    await promptForSelections(
+      [
+        makeState("skill:one", "new"),
+        makeState("skill:two", "new"),
+        makeState("skill:three", "new"),
+        makeState("skill:four", "new"),
+        makeState("skill:five", "new")
+      ],
+      [],
+      { output: Object.assign(new PassThrough(), { rows: 7 }) }
+    );
+
+    expect(checkboxMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pageSize: 3
+      }),
+      expect.any(Object)
+    );
+  });
+
   it("cancels without selections when escape is pressed in the artifact prompt", async () => {
     const input = new PassThrough();
     checkboxMock.mockImplementation((_config, context) =>
       promptPromise(
         Promise.resolve().then(() => {
           input.emit("keypress", "", { name: "escape" });
+          if (context?.signal?.aborted) {
+            throw promptAbortError();
+          }
+
+          return ["skill:review"];
+        })
+      )
+    );
+
+    const result = await promptForSelections([makeState("skill:review", "new")], [], { input });
+
+    expect(result).toEqual({ cancelled: true });
+    expect(confirmMock).not.toHaveBeenCalled();
+    expect(input.listenerCount("keypress")).toBe(0);
+  });
+
+  it("cancels when escape is reported by sequence instead of name", async () => {
+    const input = new PassThrough();
+    checkboxMock.mockImplementation((_config, context) =>
+      promptPromise(
+        Promise.resolve().then(() => {
+          input.emit("keypress", "\x1B", { sequence: "\x1B" });
           if (context?.signal?.aborted) {
             throw promptAbortError();
           }
