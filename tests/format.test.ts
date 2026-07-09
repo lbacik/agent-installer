@@ -62,16 +62,13 @@ describe("formatManagedEntryLine", () => {
 });
 
 describe("formatInteractiveStartupArtifactLines", () => {
-  it("prints conflicts but omits newly discovered artifacts", () => {
+  it("does not print conflicts before the interactive selection list", () => {
     const lines = formatInteractiveStartupArtifactLines([
       makeState("skill:ask-matt", "new"),
       makeState("prompt:commit-message", "installed-different"),
       makeState("skill:review", "conflict", "A target path already exists but is not managed by this installer.")
     ]);
 
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain("conflict skill:review <- skills/review");
-    expect(lines[0]).toContain("A target path already exists");
-    expect(lines.join("\n")).not.toContain("skill:ask-matt");
+    expect(lines).toEqual([]);
   });
 });

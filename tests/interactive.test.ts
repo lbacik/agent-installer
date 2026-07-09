@@ -26,7 +26,7 @@ function promptAbortError(): Error {
   return error;
 }
 
-function makeState(id: string, status: ArtifactState["status"]): ArtifactState {
+function makeState(id: string, status: ArtifactState["status"], conflictReason?: string): ArtifactState {
   const [kind, name] = id.split(":") as [ArtifactState["artifact"]["kind"], string];
   const managedEntry: ManagedEntry | null =
     status === "new"
@@ -58,7 +58,8 @@ function makeState(id: string, status: ArtifactState["status"]): ArtifactState {
     sourceHash: "source-hash",
     installedHash: status === "new" ? null : "installed-hash",
     status,
-    managedEntry
+    managedEntry,
+    ...(conflictReason === undefined ? {} : { conflictReason })
   };
 }
 
@@ -126,6 +127,42 @@ describe("promptForSelections", () => {
         pageSize: 2
       }),
       expect.any(Object)
+    );
+  });
+
+  it("shows conflicts in the selection list with a red marker and keeps them disabled", async () => {
+    checkboxMock.mockImplementation(() => promptPromise(Promise.resolve([])));
+
+    await promptForSelections(
+      [
+        makeState("skill:review", "new"),
+        makeState("prompt:commit-message", "conflict", "A target path already exists but is not managed by this installer.")
+      ],
+      []
+    );
+
+    expect(checkboxMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        theme: expect.objectContaining({
+          style: expect.objectContaining({
+            disabledChoice: expect.any(Function)
+          })
+        }),
+        choices: expect.arrayContaining([
+          expect.objectContaining({
+            name: expect.stringContaining("● prompt:commit-message [conflict]"),
+            value: "prompt:commit-message",
+            checked: false,
+            disabled: "A target path already exists but is not managed by this installer."
+          })
+        ])
+      }),
+      expect.any(Object)
+    );
+
+    const checkboxConfig = checkboxMock.mock.calls[0]?.[0] as { theme?: { style?: { disabledChoice?: (text: string) => string } } };
+    expect(checkboxConfig.theme?.style?.disabledChoice?.("● prompt:commit-message [conflict] reason")).toContain(
+      " ● prompt:commit-message [conflict] reason"
     );
   });
 

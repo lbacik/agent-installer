@@ -1,4 +1,5 @@
 import { checkbox, confirm } from "@inquirer/prompts";
+import pc from "picocolors";
 import type { Key } from "node:readline";
 import { ArtifactState, RemovedArtifactState } from "./types.js";
 
@@ -57,6 +58,11 @@ function resolveListLength(choiceCount: number, requestedLength: number | undefi
   return Math.min(choiceCount, Math.max(1, availableLength));
 }
 
+function formatChoiceName(state: ArtifactState): string {
+  const label = `${state.id} [${state.status}]`;
+  return state.status === "conflict" ? `${pc.red("●")} ${label}` : label;
+}
+
 async function withEscapeCancellation<T>(
   runPrompt: (context: PromptContext & { signal: AbortSignal }) => Promise<T>,
   context: PromptContext = {}
@@ -94,8 +100,13 @@ export async function promptForSelections(
               message: "Select artifacts that should remain installed",
               pageSize: listLength,
               loop: false,
+              theme: {
+                style: {
+                  disabledChoice: (text: string) => pc.dim(` ${text}`)
+                }
+              },
               choices: states.map((state) => ({
-                name: `${state.id} [${state.status}]`,
+                name: formatChoiceName(state),
                 value: state.id,
                 checked: state.status === "installed-same" || state.status === "installed-different",
                 disabled: state.status === "conflict" ? state.conflictReason ?? "conflict" : false

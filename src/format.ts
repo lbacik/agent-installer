@@ -29,7 +29,7 @@ export function formatArtifactLine(state: ArtifactState): string {
 }
 
 export function formatInteractiveStartupArtifactLines(states: ArtifactState[]): string[] {
-  return states.filter((state) => state.status === "conflict").map(formatArtifactLine);
+  return [];
 }
 
 export function formatRemovedLine(state: RemovedArtifactState): string {
