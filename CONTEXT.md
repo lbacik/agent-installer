@@ -33,9 +33,13 @@ An artifact whose installed files and metadata are owned by this CLI and may be 
 _Avoid_: user file
 
 **Source Repository**:
-The local directory scanned for installable artifacts.
+The local directory or remote Git repository scanned for installable artifacts.
 _Avoid_: registry, remote package
 
+**Source Identity**:
+The stable identifier used to scope managed state for a source repository. Local sources use the real local path; remote Git sources use a sanitized URL plus optional ref.
+_Avoid_: checkout path, cache key
+
 **Source Path**:
-The original path to an artifact inside its source repository, shown as the source repository plus the artifact's relative source path.
+The display provenance for an artifact inside its source repository, shown as the source identity plus the artifact's relative source path. For remote Git sources, this is not necessarily a live filesystem path after installation.
 _Avoid_: destination, install path

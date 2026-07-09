@@ -42,6 +42,23 @@ describe("formatManagedEntryLine", () => {
 
     expect(formatManagedEntryLine(entry)).toBe(`skill:review -> ${path.join("/source/repo", "skills/review")}`);
   });
+
+  it("prints remote source paths without filesystem path joining", () => {
+    const entry: ManagedEntry = {
+      id: "skill:review",
+      kind: "skill",
+      name: "review",
+      sourceRoot: "git+https://github.com/org/repo.git#ref=v1",
+      relativeSourcePath: "skills/review",
+      basePath: "/home/user/.agents/skills/review",
+      exposurePath: "/home/user/.claude/skills/review",
+      sourceHash: "source-hash",
+      installedHash: "installed-hash",
+      installedAt: "2026-07-08T00:00:00.000Z"
+    };
+
+    expect(formatManagedEntryLine(entry)).toBe("skill:review -> git+https://github.com/org/repo.git#ref=v1/skills/review");
+  });
 });
 
 describe("formatInteractiveStartupArtifactLines", () => {

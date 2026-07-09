@@ -36,6 +36,14 @@ export function formatRemovedLine(state: RemovedArtifactState): string {
   return `${colorizeStatus(state.status)} ${state.id} <- missing from source`;
 }
 
+function formatSourcePath(sourceRoot: string, relativeSourcePath: string): string {
+  if (sourceRoot.startsWith("git+https://")) {
+    return `${sourceRoot}/${relativeSourcePath}`;
+  }
+
+  return path.join(sourceRoot, relativeSourcePath);
+}
+
 export function formatManagedEntryLine(entry: ManagedEntry): string {
-  return `${entry.id} -> ${path.join(entry.sourceRoot, entry.relativeSourcePath)}`;
+  return `${entry.id} -> ${formatSourcePath(entry.sourceRoot, entry.relativeSourcePath)}`;
 }

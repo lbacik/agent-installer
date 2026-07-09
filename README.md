@@ -17,7 +17,7 @@ The CLI scans that repository, shows what is available, and installs the selecte
 
 Current scope:
 
-- local directories only
+- local directories or HTTPS Git repositories
 - convention-based scanning
 - no manifest file
 
@@ -92,12 +92,24 @@ Or point it at a repository explicitly:
 agent-installer /path/to/repo
 ```
 
+Or point it at an HTTPS Git repository:
+
+```bash
+agent-installer https://github.com/org/agents.git
+```
+
 ### Commands
 
 Interactive install:
 
 ```bash
 agent-installer [path]
+```
+
+Install interactively from a remote ref:
+
+```bash
+agent-installer https://github.com/org/agents.git --ref main
 ```
 
 Limit the visible interactive list length:
@@ -112,6 +124,12 @@ Show scan results only:
 agent-installer scan [path]
 ```
 
+Show scan results for a remote tag, branch, or commit:
+
+```bash
+agent-installer scan https://github.com/org/agents.git --ref v1.2.0
+```
+
 Scan deeper nested skill catalogs:
 
 ```bash
@@ -122,6 +140,12 @@ Install or update everything found:
 
 ```bash
 agent-installer install [path] --all
+```
+
+Install or update everything found from a remote ref:
+
+```bash
+agent-installer install https://github.com/org/agents.git --ref main --all
 ```
 
 Remove managed entries by id:
@@ -142,6 +166,8 @@ agent-installer list
 2. Run `agent-installer`.
 3. Review the discovered items and their statuses.
 4. Keep selected items installed, update changed ones, or remove managed items that should no longer remain installed.
+
+For remote HTTPS Git repositories, the CLI uses the installed `git` command and the user's existing HTTPS credential helpers. Remote checkouts are temporary and are removed after the command completes.
 
 ## Development
 

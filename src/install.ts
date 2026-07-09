@@ -4,6 +4,7 @@ import { hashArtifact } from "./hash.js";
 import { artifactId, getBasePath, getExposurePath, getMarkerPath, resolveTargetPaths, TargetPaths } from "./paths.js";
 import { loadState, saveState } from "./state.js";
 import type { ScanSourceOptions } from "./source.js";
+import { resolveSourceInput, type ResolveSourceOptions } from "./source-resolver.js";
 import { ArtifactState, DiscoveredArtifact, ManagedEntry, RemovedArtifactState } from "./types.js";
 
 async function pathExists(targetPath: string): Promise<boolean> {
@@ -40,6 +41,14 @@ async function readSymlinkTarget(targetPath: string): Promise<string | null> {
     return await fs.readlink(targetPath);
   } catch {
     return null;
+  }
+}
+
+async function resolveSourceIdentity(sourceRoot: string): Promise<string> {
+  try {
+    return await fs.realpath(sourceRoot);
+  } catch {
+    return sourceRoot;
   }
 }
 
@@ -141,7 +150,7 @@ export async function collectArtifactStates(
     states.push(nextState);
   }
 
-  const scopedSourceRoot = sourceRoot ? await fs.realpath(sourceRoot) : sourceArtifacts[0]?.sourceRoot;
+  const scopedSourceRoot = sourceRoot === undefined ? sourceArtifacts[0]?.sourceRoot : await resolveSourceIdentity(sourceRoot);
   const removed = state.entries
     .filter((entry) => scopedSourceRoot !== undefined && entry.sourceRoot === scopedSourceRoot)
     .filter((entry) => !sourceIds.has(entry.id))
@@ -211,12 +220,22 @@ export async function removeArtifacts(ids: string[], home?: string): Promise<Man
 export async function installAllFromSource(
   sourcePath: string,
   home?: string,
-  scanOptions?: ScanSourceOptions
+  scanOptions?: ScanSourceOptions,
+  resolveOptions?: ResolveSourceOptions
 ): Promise<ArtifactState[]> {
   const { scanSourceRepository } = await import("./source.js");
-  const artifacts = await scanSourceRepository(sourcePath, scanOptions);
-  const { states } = await collectArtifactStates(artifacts, home, sourcePath);
-  const installable = states.filter((state) => state.status === "new" || state.status === "installed-different");
-  await installArtifacts(installable, home);
-  return states;
+  const source = await resolveSourceInput(sourcePath, resolveOptions);
+
+  try {
+    const artifacts = (await scanSourceRepository(source.scanRoot, scanOptions)).map((artifact) => ({
+      ...artifact,
+      sourceRoot: source.sourceIdentity
+    }));
+    const { states } = await collectArtifactStates(artifacts, home, source.sourceIdentity);
+    const installable = states.filter((state) => state.status === "new" || state.status === "installed-different");
+    await installArtifacts(installable, home);
+    return states;
+  } finally {
+    await source.cleanup();
+  }
 }
