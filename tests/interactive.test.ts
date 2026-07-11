@@ -2,7 +2,7 @@ import { checkbox, confirm } from "@inquirer/prompts";
 import { PassThrough } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
-import { promptForSelections } from "../src/interactive.js";
+import { promptForManagedArtifactRemovals, promptForSelections } from "../src/interactive.js";
 import type { ArtifactState, ManagedEntry, RemovedArtifactState } from "../src/types.js";
 
 vi.mock("@inquirer/prompts", () => ({
@@ -250,6 +250,60 @@ describe("promptForSelections", () => {
     );
 
     const result = await promptForSelections([makeState("skill:review", "installed-same")], [removedEntry], { input });
+
+    expect(result).toEqual({ cancelled: true });
+    expect(input.listenerCount("keypress")).toBe(0);
+  });
+});
+
+describe("promptForManagedArtifactRemovals", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("preselects every managed artifact and returns the unselected ids", async () => {
+    checkboxMock.mockImplementation(() => promptPromise(Promise.resolve(["skill:review"])));
+
+    const result = await promptForManagedArtifactRemovals([
+      removedManagedEntry,
+      {
+        ...removedManagedEntry,
+        id: "skill:review",
+        kind: "skill",
+        name: "review",
+        relativeSourcePath: "skills/review"
+      }
+    ]);
+
+    expect(result).toEqual({ cancelled: false, removeIds: ["prompt:old"] });
+    expect(checkboxMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: "Select managed artifacts that should remain installed",
+        choices: expect.arrayContaining([
+          expect.objectContaining({ name: "prompt:old -> /repo/prompts/old.md", checked: true }),
+          expect.objectContaining({ name: "skill:review -> /repo/skills/review", checked: true })
+        ])
+      }),
+      expect.any(Object)
+    );
+  });
+
+  it("cancels without removals when escape is pressed", async () => {
+    const input = new PassThrough();
+    checkboxMock.mockImplementation((_config, context) =>
+      promptPromise(
+        Promise.resolve().then(() => {
+          input.emit("keypress", "", { name: "escape" });
+          if (context?.signal?.aborted) {
+            throw promptAbortError();
+          }
+
+          return [];
+        })
+      )
+    );
+
+    const result = await promptForManagedArtifactRemovals([removedManagedEntry], { input });
 
     expect(result).toEqual({ cancelled: true });
     expect(input.listenerCount("keypress")).toBe(0);

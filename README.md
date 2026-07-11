@@ -154,10 +154,16 @@ Remove managed entries by id:
 agent-installer uninstall skill:review prompt:commit-message
 ```
 
-List installed managed entries:
+Interactively list installed managed entries. Unselect entries to uninstall them:
 
 ```bash
 agent-installer list
+```
+
+Limit the visible interactive list length:
+
+```bash
+agent-installer list --list-length 12
 ```
 
 ## Typical Workflow

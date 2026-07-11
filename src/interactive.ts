@@ -1,7 +1,8 @@
 import { checkbox, confirm } from "@inquirer/prompts";
 import pc from "picocolors";
 import type { Key } from "node:readline";
-import { ArtifactState, RemovedArtifactState } from "./types.js";
+import { formatManagedEntryLine } from "./format.js";
+import type { ArtifactState, ManagedEntry, RemovedArtifactState } from "./types.js";
 
 export interface InteractiveSelection {
   cancelled: false;
@@ -14,6 +15,13 @@ export interface InteractiveCancellation {
 }
 
 export type InteractiveResult = InteractiveSelection | InteractiveCancellation;
+
+export interface ManagedArtifactRemovalSelection {
+  cancelled: false;
+  removeIds: string[];
+}
+
+export type ManagedArtifactRemovalResult = ManagedArtifactRemovalSelection | InteractiveCancellation;
 
 interface PromptContext {
   input?: NodeJS.ReadableStream;
@@ -168,5 +176,46 @@ export async function promptForSelections(
     cancelled: false,
     installIds,
     removeIds: [...removeIds, ...removed.map((entry) => entry.id)]
+  };
+}
+
+export async function promptForManagedArtifactRemovals(
+  entries: ManagedEntry[],
+  context: PromptForSelectionsOptions = {}
+): Promise<ManagedArtifactRemovalResult> {
+  const output = context.output ?? process.stdout;
+  const listLength = resolveListLength(entries.length, context.listLength, output);
+  let selectedIds: Set<string>;
+  try {
+    selectedIds = new Set(
+      await withEscapeCancellation(
+        (promptContext) =>
+          checkbox(
+            {
+              message: "Select managed artifacts that should remain installed",
+              pageSize: listLength,
+              loop: false,
+              choices: entries.map((entry) => ({
+                name: formatManagedEntryLine(entry),
+                value: entry.id,
+                checked: true
+              }))
+            },
+            promptContext
+          ),
+        context
+      )
+    );
+  } catch (error) {
+    if (isPromptCancellation(error)) {
+      return { cancelled: true };
+    }
+
+    throw error;
+  }
+
+  return {
+    cancelled: false,
+    removeIds: entries.filter((entry) => !selectedIds.has(entry.id)).map((entry) => entry.id)
   };
 }

@@ -2,8 +2,8 @@
 
 import { Command } from "commander";
 import { collectArtifactStates, installArtifacts, removeArtifacts } from "./install.js";
-import { formatArtifactLine, formatInteractiveStartupArtifactLines, formatManagedEntryLine, formatRemovedLine } from "./format.js";
-import { promptForSelections } from "./interactive.js";
+import { formatArtifactLine, formatInteractiveStartupArtifactLines, formatRemovedLine } from "./format.js";
+import { promptForManagedArtifactRemovals, promptForSelections } from "./interactive.js";
 import { resolveTargetPaths } from "./paths.js";
 import { loadState } from "./state.js";
 import { withResolvedArtifactStates } from "./source-workflow.js";
@@ -162,17 +162,30 @@ function createProgram(): Command {
 
   program
     .command("list")
-    .description("List currently managed artifacts from the base store.")
-    .action(async () => {
+    .description("Interactively manage currently installed artifacts from the base store.")
+    .option(
+      "--list-length <count>",
+      "Number of artifacts visible in the interactive selection list",
+      (value) => parsePositiveInteger(value, "--list-length")
+    )
+    .action(async (options: { listLength?: number }) => {
       const state = await loadState(resolveTargetPaths());
       if (state.entries.length === 0) {
         console.log("No managed artifacts.");
         return;
       }
 
-      for (const entry of state.entries) {
-        console.log(formatManagedEntryLine(entry));
+      const selection = await promptForManagedArtifactRemovals(
+        state.entries,
+        options.listLength === undefined ? {} : { listLength: options.listLength }
+      );
+      if (selection.cancelled) {
+        console.log("No changes applied.");
+        return;
       }
+
+      const removed = await removeArtifacts(selection.removeIds);
+      console.log(removed.length > 0 ? `removed ${removed.length}` : "No changes applied.");
     });
 
   return program;
