@@ -2,7 +2,7 @@
 
 import { Command } from "commander";
 import { collectArtifactStates, installArtifacts, removeArtifacts } from "./install.js";
-import { formatArtifactLine, formatInteractiveStartupArtifactLines, formatRemovedLine } from "./format.js";
+import { formatArtifactLine, formatOperationLine, formatRemovedLine } from "./format.js";
 import { promptForManagedArtifactRemovals, promptForSelections } from "./interactive.js";
 import { resolveTargetPaths } from "./paths.js";
 import { loadState } from "./state.js";
@@ -56,12 +56,10 @@ function addRefOption(command: Command): Command {
 
 async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOptions, listLength?: number, ref?: string): Promise<void> {
   await withResolvedArtifactStates(inputPath, undefined, scanOptions, ref === undefined ? undefined : { ref }, async ({ states, removed }) => {
-    printLines(formatInteractiveStartupArtifactLines(states));
-    if (removed.length > 0) {
-      printLines(removed.map(formatRemovedLine));
-    }
-
-    const selection = await promptForSelections(states, removed, listLength === undefined ? {} : { listLength });
+    const selection = await promptForSelections(states, removed, {
+      clearPromptOnDone: true,
+      ...(listLength === undefined ? {} : { listLength })
+    });
     if (selection.cancelled) {
       console.log("No changes applied.");
       return;
@@ -77,23 +75,17 @@ async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOption
       return state;
     });
 
-    if (selection.installIds.length > 0) {
-      await installArtifacts(installTargets);
-    }
+    const installed = selection.installIds.length > 0 ? await installArtifacts(installTargets) : [];
+    const removedEntries = selection.removeIds.length > 0 ? await removeArtifacts(selection.removeIds) : [];
 
-    if (selection.removeIds.length > 0) {
-      await removeArtifacts(selection.removeIds);
+    const operations = [
+      ...installTargets.map((state) => formatOperationLine(state.status === "new" ? "created" : "updated", state.id)),
+      ...removedEntries.map((entry) => formatOperationLine("removed", entry.id))
+    ];
+    printLines(operations);
+    if (installed.length === 0 && removedEntries.length === 0) {
+      console.log("No changes applied.");
     }
-
-    const summary = [];
-    if (selection.installIds.length > 0) {
-      summary.push(`installed/updated ${selection.installIds.length}`);
-    }
-    if (selection.removeIds.length > 0) {
-      summary.push(`removed ${selection.removeIds.length}`);
-    }
-
-    console.log(summary.length > 0 ? summary.join(", ") : "No changes applied.");
   });
 }
 
@@ -177,7 +169,10 @@ function createProgram(): Command {
 
       const selection = await promptForManagedArtifactRemovals(
         state.entries,
-        options.listLength === undefined ? {} : { listLength: options.listLength }
+        {
+          clearPromptOnDone: true,
+          ...(options.listLength === undefined ? {} : { listLength: options.listLength })
+        }
       );
       if (selection.cancelled) {
         console.log("No changes applied.");
@@ -185,7 +180,10 @@ function createProgram(): Command {
       }
 
       const removed = await removeArtifacts(selection.removeIds);
-      console.log(removed.length > 0 ? `removed ${removed.length}` : "No changes applied.");
+      printLines(removed.map((entry) => formatOperationLine("removed", entry.id)));
+      if (removed.length === 0) {
+        console.log("No changes applied.");
+      }
     });
 
   return program;

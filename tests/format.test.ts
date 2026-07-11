@@ -1,6 +1,6 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { formatInteractiveStartupArtifactLines, formatManagedEntryLines } from "../src/format.js";
+import { formatInteractiveStartupArtifactLines, formatManagedEntryLines, formatOperationLine } from "../src/format.js";
 import type { ArtifactState, ManagedEntry } from "../src/types.js";
 
 function makeState(id: string, status: ArtifactState["status"], conflictReason?: string): ArtifactState {
@@ -104,5 +104,13 @@ describe("formatInteractiveStartupArtifactLines", () => {
     ]);
 
     expect(lines).toEqual([]);
+  });
+});
+
+describe("formatOperationLine", () => {
+  it("prints the operation and artifact id", () => {
+    expect(formatOperationLine("created", "skill:review")).toBe("created skill:review");
+    expect(formatOperationLine("updated", "skill:review")).toBe("updated skill:review");
+    expect(formatOperationLine("removed", "skill:review")).toBe("removed skill:review");
   });
 });

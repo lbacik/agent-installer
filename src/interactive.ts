@@ -108,6 +108,7 @@ export async function promptForSelections(
               message: "Select artifacts that should remain installed",
               pageSize: listLength,
               loop: false,
+              ...(context.clearPromptOnDone === undefined ? {} : { clearPromptOnDone: context.clearPromptOnDone }),
               theme: {
                 style: {
                   disabledChoice: (text: string) => pc.dim(` ${text}`)
@@ -154,7 +155,8 @@ export async function promptForSelections(
         confirm(
           {
             message: `Remove ${removed.length} managed artifact(s) that are no longer present in the source repository?`,
-            default: false
+            default: false,
+            ...(context.clearPromptOnDone === undefined ? {} : { clearPromptOnDone: context.clearPromptOnDone })
           },
           promptContext
         ),
@@ -196,6 +198,7 @@ export async function promptForManagedArtifactRemovals(
               message: "Select managed artifacts that should remain installed",
               pageSize: listLength,
               loop: false,
+              ...(context.clearPromptOnDone === undefined ? {} : { clearPromptOnDone: context.clearPromptOnDone }),
               choices: entries.map((entry, index) => {
                 const name = entryLines[index];
                 if (name === undefined) {

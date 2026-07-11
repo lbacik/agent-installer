@@ -51,3 +51,7 @@ export function formatManagedEntryLines(entries: ManagedEntry[]): string[] {
     (entry) => `${entry.id.padEnd(idWidth)}  ${formatSourcePath(entry.sourceRoot, entry.relativeSourcePath)}`
   );
 }
+
+export function formatOperationLine(action: "created" | "updated" | "removed", id: string): string {
+  return `${action} ${id}`;
+}
