@@ -44,6 +44,10 @@ function formatSourcePath(sourceRoot: string, relativeSourcePath: string): strin
   return path.join(sourceRoot, relativeSourcePath);
 }
 
-export function formatManagedEntryLine(entry: ManagedEntry): string {
-  return `${entry.id} -> ${formatSourcePath(entry.sourceRoot, entry.relativeSourcePath)}`;
+export function formatManagedEntryLines(entries: ManagedEntry[]): string[] {
+  const idWidth = Math.max(...entries.map((entry) => entry.id.length));
+
+  return entries.map(
+    (entry) => `${entry.id.padEnd(idWidth)}  ${formatSourcePath(entry.sourceRoot, entry.relativeSourcePath)}`
+  );
 }

@@ -1,7 +1,7 @@
 import { checkbox, confirm } from "@inquirer/prompts";
 import pc from "picocolors";
 import type { Key } from "node:readline";
-import { formatManagedEntryLine } from "./format.js";
+import { formatManagedEntryLines } from "./format.js";
 import type { ArtifactState, ManagedEntry, RemovedArtifactState } from "./types.js";
 
 export interface InteractiveSelection {
@@ -185,6 +185,7 @@ export async function promptForManagedArtifactRemovals(
 ): Promise<ManagedArtifactRemovalResult> {
   const output = context.output ?? process.stdout;
   const listLength = resolveListLength(entries.length, context.listLength, output);
+  const entryLines = formatManagedEntryLines(entries);
   let selectedIds: Set<string>;
   try {
     selectedIds = new Set(
@@ -195,11 +196,14 @@ export async function promptForManagedArtifactRemovals(
               message: "Select managed artifacts that should remain installed",
               pageSize: listLength,
               loop: false,
-              choices: entries.map((entry) => ({
-                name: formatManagedEntryLine(entry),
-                value: entry.id,
-                checked: true
-              }))
+              choices: entries.map((entry, index) => {
+                const name = entryLines[index];
+                if (name === undefined) {
+                  throw new Error("Missing formatted managed artifact entry.");
+                }
+
+                return { name, value: entry.id, checked: true };
+              })
             },
             promptContext
           ),

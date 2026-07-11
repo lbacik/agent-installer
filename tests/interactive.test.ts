@@ -280,8 +280,8 @@ describe("promptForManagedArtifactRemovals", () => {
       expect.objectContaining({
         message: "Select managed artifacts that should remain installed",
         choices: expect.arrayContaining([
-          expect.objectContaining({ name: "prompt:old -> /repo/prompts/old.md", checked: true }),
-          expect.objectContaining({ name: "skill:review -> /repo/skills/review", checked: true })
+          expect.objectContaining({ name: "prompt:old    /repo/prompts/old.md", checked: true }),
+          expect.objectContaining({ name: "skill:review  /repo/skills/review", checked: true })
         ])
       }),
       expect.any(Object)
