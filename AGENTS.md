@@ -134,3 +134,13 @@ Key tests live in:
 
 - [tests/scanner.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/scanner.test.ts:1)
 - [tests/install.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/install.test.ts:1)
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues in `lbacik/agent-installer`, managed via the `gh` CLI. See [docs/agents/issue-tracker.md](docs/agents/issue-tracker.md).
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See [docs/agents/domain.md](docs/agents/domain.md).
