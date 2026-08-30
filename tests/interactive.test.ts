@@ -1,5 +1,6 @@
 import { checkbox, confirm } from "@inquirer/prompts";
 import { PassThrough } from "node:stream";
+import pc from "picocolors";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import { promptForManagedArtifactRemovals, promptForSelections } from "../src/interactive.js";
@@ -150,7 +151,7 @@ describe("promptForSelections", () => {
         }),
         choices: expect.arrayContaining([
           expect.objectContaining({
-            name: expect.stringContaining("● prompt:commit-message [conflict]"),
+            name: expect.stringContaining(`${pc.red("●")} prompt:commit-message [conflict]`),
             value: "prompt:commit-message",
             checked: false,
             disabled: "A target path already exists but is not managed by this installer."
