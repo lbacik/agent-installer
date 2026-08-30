@@ -1,31 +1,36 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { ArtifactKind } from "./types.js";
+import { toSystemPath } from "./paths.js";
+import { ArtifactKind, OverlayFile } from "./types.js";
 
-async function collectDirectoryEntries(dir: string): Promise<string[]> {
+async function collectDirectoryEntries(dir: string, prefix: string): Promise<string[]> {
   const dirents = await fs.readdir(dir, { withFileTypes: true });
   const entries = await Promise.all(
     dirents
       .filter((dirent) => dirent.name !== ".agent-installer.json")
       .map(async (dirent) => {
-        const fullPath = path.join(dir, dirent.name);
+        const relativePath = prefix === "" ? dirent.name : `${prefix}/${dirent.name}`;
         if (dirent.isDirectory()) {
-          return collectDirectoryEntries(fullPath);
+          return collectDirectoryEntries(path.join(dir, dirent.name), relativePath);
         }
 
         if (dirent.isFile()) {
-          return [fullPath];
+          return [relativePath];
         }
 
         return [];
       })
   );
 
-  return entries.flat().sort();
+  return entries.flat();
 }
 
-export async function hashArtifact(kind: ArtifactKind, targetPath: string): Promise<string> {
+export async function hashArtifact(
+  kind: ArtifactKind,
+  targetPath: string,
+  overlay: OverlayFile | null = null
+): Promise<string> {
   const hash = createHash("sha256");
 
   if (kind === "prompt") {
@@ -34,12 +39,17 @@ export async function hashArtifact(kind: ArtifactKind, targetPath: string): Prom
     return hash.digest("hex");
   }
 
-  const files = await collectDirectoryEntries(targetPath);
+  const relativePaths = await collectDirectoryEntries(targetPath, "");
+  const overlaidPaths = overlay === null ? relativePaths : [...new Set([...relativePaths, overlay.relativePath])];
 
-  for (const file of files) {
-    hash.update(path.relative(targetPath, file));
+  for (const relativePath of overlaidPaths.sort()) {
+    hash.update(relativePath);
     hash.update("\n");
-    hash.update(await fs.readFile(file));
+    hash.update(
+      relativePath === overlay?.relativePath
+        ? overlay.content
+        : await fs.readFile(toSystemPath(targetPath, relativePath))
+    );
   }
 
   return hash.digest("hex");

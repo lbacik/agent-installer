@@ -49,6 +49,10 @@ export function getExposurePath(paths: TargetPaths, artifact: Pick<DiscoveredArt
   return path.join(paths.claudeCommandsDir, `${artifact.name}.md`);
 }
 
+export function toSystemPath(basePath: string, relativePath: string): string {
+  return path.join(basePath, ...relativePath.split("/"));
+}
+
 export function getMarkerPath(basePath: string, kind: ArtifactKind): string {
   return kind === "skill" ? path.join(basePath, ".agent-installer.json") : `${basePath}.agent-installer.json`;
 }

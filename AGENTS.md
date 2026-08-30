@@ -48,6 +48,10 @@ Canonical copies live under `~/.agents`:
 - `~/.agents/skills/<name>/...`
 - `~/.agents/prompts/<name>.md`
 
+Generated managed content:
+
+- `~/.agents/skills/<name>/agents/openai.yaml` is materialized when the source `SKILL.md` frontmatter sets the top-level boolean `disable-model-invocation: true`. It carries `policy.allow_implicit_invocation: false` so Codex matches the Claude invocation intent. The source repository is never modified, and skills that already ship their own `agents/openai.yaml` are copied unchanged.
+
 Claude exposure paths:
 
 - `~/.claude/skills/<name>` -> symlink to `~/.agents/skills/<name>`
@@ -112,7 +116,8 @@ Meaning:
 - [src/install.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/install.ts:1): reconciliation, install, uninstall
 - [src/state.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/state.ts:1): persisted managed state
 - [src/paths.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/paths.ts:1): target-path resolution
-- [src/hash.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/hash.ts:1): content hashing
+- [src/hash.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/hash.ts:1): content hashing, including the materialized overlay used for expected source hashes
+- [src/skill-invocation-policy.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/skill-invocation-policy.ts:1): Claude-to-Codex invocation policy translation
 - [src/interactive.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/interactive.ts:1): interactive selection UI
 
 ## Working Rules

@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { hashArtifact } from "./hash.js";
 import { artifactId, getBasePath, getExposurePath, getMarkerPath, resolveTargetPaths, TargetPaths } from "./paths.js";
+import { materializeOverlay, resolveInvocationPolicyOverlay } from "./skill-invocation-policy.js";
 import { loadState, saveState } from "./state.js";
 import type { ScanSourceOptions } from "./source.js";
 import { resolveSourceInput, type ResolveSourceOptions } from "./source-resolver.js";
@@ -30,6 +31,7 @@ async function copyArtifact(artifact: DiscoveredArtifact, basePath: string): Pro
 
   if (artifact.kind === "skill") {
     await fs.cp(artifact.sourcePath, basePath, { recursive: true });
+    await materializeOverlay(basePath, await resolveInvocationPolicyOverlay(artifact.sourcePath));
     return;
   }
 
@@ -93,7 +95,8 @@ export async function collectArtifactStates(
 
   for (const artifact of sourceArtifacts) {
     const id = artifactId(artifact.kind, artifact.name);
-    const sourceHash = await hashArtifact(artifact.kind, artifact.sourcePath);
+    const overlay = artifact.kind === "skill" ? await resolveInvocationPolicyOverlay(artifact.sourcePath) : null;
+    const sourceHash = await hashArtifact(artifact.kind, artifact.sourcePath, overlay);
     const managedEntry = entriesById.get(id) ?? null;
     const basePath = getBasePath(paths, artifact);
     const exposurePath = getExposurePath(paths, artifact);
