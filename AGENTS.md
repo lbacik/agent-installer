@@ -137,11 +137,34 @@ Run these before closing work:
 - `pnpm typecheck`
 - `pnpm test`
 - `pnpm build`
+- `pnpm test:package`
+
+`pnpm test:package` packs the tarball, installs it into a clean project, and
+runs the CLI against a fixture repository. It catches packaging faults the unit
+tests cannot see, such as a path missing from `files`, a lost bin shebang, or a
+runtime dependency left in `devDependencies`. It redirects `HOME`, so it never
+touches the real `~/.agents` store.
 
 Key tests live in:
 
 - [tests/scanner.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/scanner.test.ts:1)
 - [tests/install.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/install.test.ts:1)
+
+## Release
+
+CI runs typecheck, tests, build, and the package smoke test on Node 20, 22, and
+24 for every pull request. Publishing is automated: pushing a `v*` tag runs
+[.github/workflows/release.yml](/Volumes/Sources/js/ts/ai-skill-installer/.github/workflows/release.yml:1),
+which publishes to npm through OIDC trusted publishing. There is no npm token in
+the repository.
+
+The release workflow refuses to publish unless the tag is an ancestor of `main`
+and the tag name matches `version` in `package.json`.
+
+`main` is protected by a repository ruleset: it takes pull requests only, and the
+three `verify` checks must pass. So the version bump belongs on `develop` and
+reaches `main` through a pull request. Do not run `pnpm version` on `main`; a
+direct push there is rejected. Tag the merge commit on `main` afterwards.
 
 ## Agent skills
 
