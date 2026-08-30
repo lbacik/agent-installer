@@ -45,7 +45,7 @@ Whether a tool may select a skill implicitly. Claude Code declares it in `SKILL.
 _Avoid_: autoload, auto-invoke
 
 **Overlay**:
-Content the installer materializes into the base-store copy of an artifact that does not exist in the source repository, such as the Codex invocation policy translated from Claude frontmatter. An overlay is part of the artifact's hashed content, so an unchanged managed copy still reconciles as installed-same.
+Content the installer materializes into the base-store copy of an artifact, either adding a file the source repository does not have or replacing one it does, such as the Codex invocation policy translated from Claude frontmatter. An overlay is part of the artifact's hashed content, so an unchanged managed copy still reconciles as installed-same.
 _Avoid_: patch, generated cache
 
 **Source Path**:

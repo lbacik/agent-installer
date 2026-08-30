@@ -39,8 +39,17 @@ function skillWithFrontmatter(body: string): string {
 
 const CODEX_METADATA_PATH = path.join("agents", "openai.yaml");
 
-async function readCodexPolicy(skillBasePath: string): Promise<unknown> {
+async function readCodexDocument(skillBasePath: string): Promise<unknown> {
   return parseYaml(await fs.readFile(path.join(skillBasePath, CODEX_METADATA_PATH), "utf8"));
+}
+
+async function readCodexSource(skillBasePath: string): Promise<string> {
+  return fs.readFile(path.join(skillBasePath, CODEX_METADATA_PATH), "utf8");
+}
+
+async function writeCodexMetadata(skillPath: string, content: string): Promise<void> {
+  await fs.mkdir(path.join(skillPath, "agents"), { recursive: true });
+  await fs.writeFile(path.join(skillPath, CODEX_METADATA_PATH), content, "utf8");
 }
 
 async function installAll(repo: string, home: string): Promise<void> {
@@ -234,7 +243,7 @@ describe("codex invocation policy translation", () => {
 
     const paths = resolveTargetPaths(home);
     const skillBasePath = path.join(paths.agentsSkillsDir, "restricted");
-    expect(await readCodexPolicy(skillBasePath)).toEqual({ policy: { allow_implicit_invocation: false } });
+    expect(await readCodexDocument(skillBasePath)).toEqual({ policy: { allow_implicit_invocation: false } });
     expect(await statusOf(repo, home, "skill:restricted")).toBe("installed-same");
   });
 
@@ -337,7 +346,7 @@ describe("codex invocation policy translation", () => {
 
     const paths = resolveTargetPaths(home);
     expect(states.map((state) => state.id)).toEqual(["skill:restricted"]);
-    expect(await readCodexPolicy(path.join(paths.agentsSkillsDir, "restricted"))).toEqual({
+    expect(await readCodexDocument(path.join(paths.agentsSkillsDir, "restricted"))).toEqual({
       policy: { allow_implicit_invocation: false }
     });
 
@@ -359,5 +368,158 @@ describe("codex invocation policy translation", () => {
     expect(await fs.readFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "utf8")).toBe("commit prompt\n");
     expect(await statusOf(repo, home, "skill:review")).toBe("installed-same");
     expect(await statusOf(repo, home, "prompt:commit-message")).toBe("installed-same");
+  });
+});
+
+describe("authored codex metadata", () => {
+  it("retains authored interface and dependency metadata while enforcing the policy", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const skillPath = await writeSkill(repo, "restricted", skillWithFrontmatter("disable-model-invocation: true"));
+    await writeCodexMetadata(
+      skillPath,
+      "interface:\n  arguments:\n    - name: path\ndependencies:\n  - jq\n"
+    );
+
+    await installAll(repo, home);
+
+    const paths = resolveTargetPaths(home);
+    const skillBasePath = path.join(paths.agentsSkillsDir, "restricted");
+    expect(await readCodexDocument(skillBasePath)).toEqual({
+      interface: { arguments: [{ name: "path" }] },
+      dependencies: ["jq"],
+      policy: { allow_implicit_invocation: false }
+    });
+    expect(await statusOf(repo, home, "skill:restricted")).toBe("installed-same");
+  });
+
+  it("gives the Claude setting precedence over a conflicting authored policy", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const skillPath = await writeSkill(repo, "restricted", skillWithFrontmatter("disable-model-invocation: true"));
+    await writeCodexMetadata(
+      skillPath,
+      "policy:\n  allow_implicit_invocation: true\n  requires_approval: always\n"
+    );
+
+    await installAll(repo, home);
+
+    const paths = resolveTargetPaths(home);
+    expect(await readCodexDocument(path.join(paths.agentsSkillsDir, "restricted"))).toEqual({
+      policy: { allow_implicit_invocation: false, requires_approval: "always" }
+    });
+    expect(await fs.readFile(path.join(skillPath, CODEX_METADATA_PATH), "utf8")).toContain(
+      "allow_implicit_invocation: true"
+    );
+    expect(await statusOf(repo, home, "skill:restricted")).toBe("installed-same");
+  });
+
+  it("keeps an already compatible authored policy stable across install and rescan", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const skillPath = await writeSkill(repo, "restricted", skillWithFrontmatter("disable-model-invocation: true"));
+    await writeCodexMetadata(skillPath, "policy:\n  allow_implicit_invocation: false\n");
+
+    await installAll(repo, home);
+
+    const paths = resolveTargetPaths(home);
+    const skillBasePath = path.join(paths.agentsSkillsDir, "restricted");
+    const installedMetadata = await readCodexSource(skillBasePath);
+    expect(await statusOf(repo, home, "skill:restricted")).toBe("installed-same");
+
+    await installAll(repo, home);
+
+    expect(await readCodexSource(skillBasePath)).toBe(installedMetadata);
+    expect(await readCodexDocument(skillBasePath)).toEqual({ policy: { allow_implicit_invocation: false } });
+    expect(await statusOf(repo, home, "skill:restricted")).toBe("installed-same");
+  });
+
+  it.each([
+    ["an empty policy key", "dependencies:\n  - jq\npolicy:\n"],
+    ["an explicitly null policy", "policy: null\n"]
+  ])("fills in %s instead of failing", async (_label, metadata) => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const skillPath = await writeSkill(repo, "restricted", skillWithFrontmatter("disable-model-invocation: true"));
+    await writeCodexMetadata(skillPath, metadata);
+
+    await installAll(repo, home);
+
+    const paths = resolveTargetPaths(home);
+    const skillBasePath = path.join(paths.agentsSkillsDir, "restricted");
+    expect(await readCodexDocument(skillBasePath)).toMatchObject({ policy: { allow_implicit_invocation: false } });
+    expect(await statusOf(repo, home, "skill:restricted")).toBe("installed-same");
+  });
+
+  it("keeps authored long values unfolded", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const skillPath = await writeSkill(repo, "restricted", skillWithFrontmatter("disable-model-invocation: true"));
+    const description = "word ".repeat(40).trim();
+    await writeCodexMetadata(skillPath, `description: ${description}\n`);
+
+    await installAll(repo, home);
+
+    const paths = resolveTargetPaths(home);
+    const skillBasePath = path.join(paths.agentsSkillsDir, "restricted");
+    expect(await readCodexSource(skillBasePath)).toContain(`description: ${description}\n`);
+    expect(await readCodexDocument(skillBasePath)).toMatchObject({ description });
+  });
+
+  it.each([
+    ["unparsable YAML", "policy: [unclosed\n: : :\n"],
+    ["a non-mapping document", "just-a-string\n"],
+    ["a non-mapping policy value", "policy: nope\n"]
+  ])("fails before touching the managed copy when authored metadata is %s", async (_label, metadata) => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const skillPath = await writeSkill(repo, "restricted", skillWithFrontmatter("disable-model-invocation: true"));
+    await writeCodexMetadata(skillPath, metadata);
+
+    await expect(installAll(repo, home)).rejects.toThrow(/agents[\\/]openai\.yaml/);
+    await expect(installAll(repo, home)).rejects.toThrow(/disable-model-invocation/);
+
+    const paths = resolveTargetPaths(home);
+    await expect(fs.access(path.join(paths.agentsSkillsDir, "restricted"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.access(path.join(paths.claudeSkillsDir, "restricted"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await loadState(paths)).entries.map((entry) => entry.id)).not.toContain("skill:restricted");
+  });
+
+  it("leaves an already managed copy unchanged when the source metadata becomes malformed", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const skillPath = await writeSkill(repo, "restricted", skillWithFrontmatter("disable-model-invocation: true"));
+    await writeCodexMetadata(skillPath, "dependencies:\n  - jq\n");
+
+    await installAll(repo, home);
+
+    const paths = resolveTargetPaths(home);
+    const skillBasePath = path.join(paths.agentsSkillsDir, "restricted");
+    const installedMetadata = await readCodexSource(skillBasePath);
+
+    await writeCodexMetadata(skillPath, "policy: [unclosed\n: : :\n");
+
+    await expect(installAll(repo, home)).rejects.toThrow(/openai\.yaml/);
+    expect(await readCodexSource(skillBasePath)).toBe(installedMetadata);
+  });
+
+  it("does not validate authored metadata when the Claude setting does not translate", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const broken = "policy: [unclosed\n: : :\n";
+    const permissive = await writeSkill(repo, "permissive", skillWithFrontmatter("disable-model-invocation: false"));
+    await writeCodexMetadata(permissive, broken);
+    const plain = await writeSkill(repo, "plain", "# Plain\n");
+    await writeCodexMetadata(plain, "policy:\n  allow_implicit_invocation: true\n");
+
+    await installAll(repo, home);
+
+    const paths = resolveTargetPaths(home);
+    expect(await readCodexSource(path.join(paths.agentsSkillsDir, "permissive"))).toBe(broken);
+    expect(await readCodexDocument(path.join(paths.agentsSkillsDir, "plain"))).toEqual({
+      policy: { allow_implicit_invocation: true }
+    });
+    expect(await statusOf(repo, home, "skill:permissive")).toBe("installed-same");
+    expect(await statusOf(repo, home, "skill:plain")).toBe("installed-same");
   });
 });

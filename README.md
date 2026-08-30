@@ -68,10 +68,50 @@ Behavior:
 
 - the translation is automatic in every install mode: interactive, `scan`, `install --all`, and remote Git sources
 - only a literal boolean `true` translates; `"true"`, `1`, `yes`, `false`, and a missing setting change nothing
-- the generated `agents/openai.yaml` is a detail of the managed copy under `~/.agents`; the source repository is never modified
+- the `agents/openai.yaml` it writes is a detail of the managed copy under `~/.agents`; the source repository is never modified
 - Codex still runs the skill when it is invoked explicitly; only implicit selection is disabled
-- a skill that already ships its own `agents/openai.yaml` keeps that file verbatim and receives no generated policy
+- there is no CLI flag for the translation, and none is required
 - removing the setting from the source removes the generated file on the next update, and uninstalling removes it with the skill
+
+### Skills that already ship Codex metadata
+
+A skill may ship its own `agents/openai.yaml`. When the Claude setting enables the translation, the managed copy is
+that authored file with the invocation policy applied on top:
+
+```yaml
+# skills/review/agents/openai.yaml in the source repository
+interface:
+  arguments:
+    - name: path
+dependencies:
+  - jq
+policy:
+  allow_implicit_invocation: true
+```
+
+```yaml
+# ~/.agents/skills/review/agents/openai.yaml after installation
+interface:
+  arguments:
+    - name: path
+dependencies:
+  - jq
+policy:
+  allow_implicit_invocation: false
+```
+
+Rules:
+
+- authored interface, dependency, and other metadata is retained, including sibling keys under `policy` and comments;
+  the file is re-serialized, so its formatting may be normalized even though its content is not
+- precedence: when the authored Codex policy and the Claude setting disagree, `disable-model-invocation: true` wins,
+  because it is the cross-runtime declaration being translated; only the managed copy changes
+- an authored policy that already disables implicit invocation is kept as is, and a rescan reports `installed-same`
+- an empty `policy:` key carries no authored intent, so the translation fills it in
+- if the translation applies but the authored metadata cannot be parsed as a YAML mapping, the run fails with a
+  source-configuration error and the managed copy is neither created nor changed; because reconciliation resolves the
+  translation up front, this aborts `scan` as well as an install
+- when the Claude setting does not enable the translation, authored metadata is copied verbatim and never validated
 
 ## Installation
 

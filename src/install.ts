@@ -6,7 +6,7 @@ import { materializeOverlay, resolveInvocationPolicyOverlay } from "./skill-invo
 import { loadState, saveState } from "./state.js";
 import type { ScanSourceOptions } from "./source.js";
 import { resolveSourceInput, type ResolveSourceOptions } from "./source-resolver.js";
-import { ArtifactState, DiscoveredArtifact, ManagedEntry, RemovedArtifactState } from "./types.js";
+import { ArtifactState, DiscoveredArtifact, ManagedEntry, OverlayFile, RemovedArtifactState } from "./types.js";
 
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
@@ -25,13 +25,21 @@ async function removePath(targetPath: string): Promise<void> {
   await fs.rm(targetPath, { recursive: true, force: true });
 }
 
+async function resolveOverlay(artifact: DiscoveredArtifact): Promise<OverlayFile | null> {
+  return artifact.kind === "skill" ? resolveInvocationPolicyOverlay(artifact.sourcePath) : null;
+}
+
 async function copyArtifact(artifact: DiscoveredArtifact, basePath: string): Promise<void> {
+  // Resolved before any managed path is touched, so a source-configuration error
+  // in the artifact's authored Codex metadata leaves the managed copy untouched.
+  const overlay = await resolveOverlay(artifact);
+
   await removePath(basePath);
   await ensureParentDir(basePath);
 
   if (artifact.kind === "skill") {
     await fs.cp(artifact.sourcePath, basePath, { recursive: true });
-    await materializeOverlay(basePath, await resolveInvocationPolicyOverlay(artifact.sourcePath));
+    await materializeOverlay(basePath, overlay);
     return;
   }
 
@@ -95,7 +103,7 @@ export async function collectArtifactStates(
 
   for (const artifact of sourceArtifacts) {
     const id = artifactId(artifact.kind, artifact.name);
-    const overlay = artifact.kind === "skill" ? await resolveInvocationPolicyOverlay(artifact.sourcePath) : null;
+    const overlay = await resolveOverlay(artifact);
     const sourceHash = await hashArtifact(artifact.kind, artifact.sourcePath, overlay);
     const managedEntry = entriesById.get(id) ?? null;
     const basePath = getBasePath(paths, artifact);

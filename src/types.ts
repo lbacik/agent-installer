@@ -51,9 +51,9 @@ export interface RemovedArtifactState {
 }
 
 /**
- * A file the installer materializes into the base-store copy of an artifact
- * that does not exist in the source repository. `relativePath` is POSIX-style
- * and relative to the artifact root.
+ * A file the installer materializes into the base-store copy of an artifact,
+ * either adding one the source repository does not have or replacing one it
+ * does. `relativePath` is POSIX-style and relative to the artifact root.
  */
 export interface OverlayFile {
   relativePath: string;
