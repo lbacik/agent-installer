@@ -50,7 +50,8 @@ Canonical copies live under `~/.agents`:
 
 Generated managed content:
 
-- `~/.agents/skills/<name>/agents/openai.yaml` is materialized when the source `SKILL.md` frontmatter sets the top-level boolean `disable-model-invocation: true`. It carries `policy.allow_implicit_invocation: false` so Codex matches the Claude invocation intent. The source repository is never modified, and skills that already ship their own `agents/openai.yaml` are copied unchanged.
+- `~/.agents/skills/<name>/agents/openai.yaml` is materialized when the source `SKILL.md` frontmatter sets the top-level boolean `disable-model-invocation: true`. It carries `policy.allow_implicit_invocation: false` so Codex matches the Claude invocation intent. The source repository is never modified.
+- When such a skill also ships an authored `agents/openai.yaml`, the managed copy retains that file (unrelated keys, sibling `policy` keys, and comments) and only overrides `policy.allow_implicit_invocation`. The file is re-serialized, so formatting may be normalized; an empty `policy:` key is filled in rather than rejected. The Claude setting takes precedence over a conflicting authored policy. Authored metadata that is not a YAML mapping, or whose `policy` is not a mapping, aborts with a source-configuration error before the managed target is created or changed. Skills whose frontmatter does not enable the translation are never validated.
 
 Claude exposure paths:
 
@@ -99,6 +100,8 @@ Meaning:
 - `installed-different`: managed install exists but source content changed
 - `source-missing`: previously managed entry is no longer present in the currently scanned source repository
 - `conflict`: target path exists but is not managed by this tool, or the Claude exposure symlink points elsewhere
+
+Reconciliation has no status for an unusable source. A skill whose Claude frontmatter enables the Codex invocation-policy translation but whose authored `agents/openai.yaml` cannot be parsed aborts the whole run, including `scan`, with a source-configuration error, so no managed artifact is created or changed from an ambiguous configuration.
 
 ## Important Invariants
 
