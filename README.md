@@ -46,6 +46,33 @@ Rules:
 - prompt and command files must be Markdown files
 - `prompts/foo.md` and `commands/foo.md` cannot both exist
 
+## Cross-Runtime Invocation Policy
+
+A skill that declares the Claude Code frontmatter setting `disable-model-invocation: true` is meant to be invoked
+explicitly rather than selected by the model. `agent-installer` translates that intent for Codex:
+
+| Claude Code source frontmatter      | Codex metadata in the managed copy         |
+| ----------------------------------- | ------------------------------------------ |
+| `disable-model-invocation: true`    | `agents/openai.yaml` with `policy.allow_implicit_invocation: false` |
+
+```markdown
+---
+name: review
+disable-model-invocation: true
+---
+
+# Review
+```
+
+Behavior:
+
+- the translation is automatic in every install mode: interactive, `scan`, `install --all`, and remote Git sources
+- only a literal boolean `true` translates; `"true"`, `1`, `yes`, `false`, and a missing setting change nothing
+- the generated `agents/openai.yaml` is a detail of the managed copy under `~/.agents`; the source repository is never modified
+- Codex still runs the skill when it is invoked explicitly; only implicit selection is disabled
+- a skill that already ships its own `agents/openai.yaml` keeps that file verbatim and receives no generated policy
+- removing the setting from the source removes the generated file on the next update, and uninstalling removes it with the skill
+
 ## Installation
 
 Install directly from GitHub:

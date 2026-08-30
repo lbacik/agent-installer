@@ -49,3 +49,13 @@ export interface RemovedArtifactState {
   status: "source-missing";
   managedEntry: ManagedEntry;
 }
+
+/**
+ * A file the installer materializes into the base-store copy of an artifact
+ * that does not exist in the source repository. `relativePath` is POSIX-style
+ * and relative to the artifact root.
+ */
+export interface OverlayFile {
+  relativePath: string;
+  content: string;
+}
