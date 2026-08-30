@@ -12,6 +12,12 @@ updates:
     groups:
       dev-dependencies:
         dependency-type: development
+        # Majors stay out of the group and arrive as individual pull requests.
+        # A group that bundles two compiler or runner majors gives one failing
+        # check with no way to tell which upgrade caused it.
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: github-actions
     directory: /
