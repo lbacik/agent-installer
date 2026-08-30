@@ -16,6 +16,7 @@
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:package": "./scripts/smoke-test.sh",
     "test:watch": "vitest"
   },
   "repository": {
