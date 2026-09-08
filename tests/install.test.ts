@@ -374,6 +374,79 @@ describe("install --all conflict handling", () => {
   });
 });
 
+describe("install --only selection", () => {
+  it("installs exactly the selected artifacts and leaves others uninstalled", async () => {
+    const repo = await makeRepo();
+    await writeSkill(repo, "extra", "# Extra\n");
+    const home = await makeTempDir("agent-installer-home-");
+
+    const { installed, conflicts } = await installAllFromSource(repo, home, undefined, undefined, {
+      only: ["skill:review", "prompt:commit-message"]
+    });
+
+    expect(conflicts).toEqual([]);
+    expect(installed.map((entry) => entry.id).sort()).toEqual(["prompt:commit-message", "skill:review"]);
+
+    const state = await loadState(resolveTargetPaths(home));
+    expect(state.entries.map((entry) => entry.id).sort()).toEqual(["prompt:commit-message", "skill:review"]);
+    expect(await statusOf(repo, home, "skill:extra")).toBe("new");
+  });
+
+  it("installs a repeated selector once", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+
+    const { installed } = await installAllFromSource(repo, home, undefined, undefined, {
+      only: ["skill:review", "skill:review"]
+    });
+
+    expect(installed.map((entry) => entry.id)).toEqual(["skill:review"]);
+  });
+
+  it("exits without installing anything when a selector matches no discovered artifact", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+
+    await expect(
+      installAllFromSource(repo, home, undefined, undefined, { only: ["skill:review", "skill:missing"] })
+    ).rejects.toThrow(/skill:missing/);
+
+    const state = await loadState(resolveTargetPaths(home));
+    expect(state.entries).toEqual([]);
+  });
+
+  it("aborts on a selected conflicting artifact under default strict behaviour", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    await fs.mkdir(paths.agentsPromptsDir, { recursive: true });
+    await fs.writeFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "user-owned\n", "utf8");
+
+    await expect(
+      installAllFromSource(repo, home, undefined, undefined, { only: ["skill:review", "prompt:commit-message"] })
+    ).rejects.toThrow(/prompt:commit-message/);
+
+    const state = await loadState(paths);
+    expect(state.entries).toEqual([]);
+  });
+
+  it("skips a selected conflicting artifact and installs the rest with allowConflicts", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    await fs.mkdir(paths.agentsPromptsDir, { recursive: true });
+    await fs.writeFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "user-owned\n", "utf8");
+
+    const { installed, conflicts } = await installAllFromSource(repo, home, undefined, undefined, {
+      only: ["skill:review", "prompt:commit-message"],
+      allowConflicts: true
+    });
+
+    expect(installed.map((entry) => entry.id)).toEqual(["skill:review"]);
+    expect(conflicts.map((state) => state.id)).toEqual(["prompt:commit-message"]);
+  });
+});
+
 describe("exposure symlink drift", () => {
   it("reports new for artifacts that have never been installed", async () => {
     const repo = await makeRepo();

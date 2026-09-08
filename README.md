@@ -217,6 +217,18 @@ artifacts anyway; skipped conflicts are still reported on stderr.
 agent-installer install [path] --all --allow-conflicts
 ```
 
+Install or update an exact subset by repeating `--only <artifact-id>` (the same id vocabulary `uninstall` and `list`
+use, for example `skill:review` or `prompt:commit-message`). `--only` and `--all` are mutually exclusive, and every
+selector must match a discovered artifact or the run aborts with a non-zero exit and installs nothing, naming the
+unmatched selectors:
+
+```bash
+agent-installer install [path] --only skill:review --only prompt:commit-message
+```
+
+Selection is applied to the reconciled set, so conflict handling behaves exactly as it does under `--all`, including
+`--allow-conflicts`. Unselected artifacts are left untouched.
+
 Install or update everything found from a remote ref:
 
 ```bash

@@ -81,6 +81,14 @@ Implemented commands:
   - aborts with a non-zero exit and installs nothing if the reconciled set includes a `conflict`, naming every
     conflicting id and its target path
   - `--allow-conflicts` installs the eligible artifacts anyway and reports the skipped conflicting ids on stderr
+- `agent-installer install [path] --only <artifact-id>` (repeatable)
+  - non-interactive install or update of an exact subset, using the same `skill:<name>` / `prompt:<name>` id
+    vocabulary as `uninstall` and `list`
+  - mutually exclusive with `--all`; exactly one of them is required
+  - every selector must match a discovered artifact, or the run aborts with a non-zero exit, names the unmatched
+    selectors, and installs nothing
+  - applied to the reconciled set, so conflict handling (including `--allow-conflicts`) behaves as it does under
+    `--all`; unselected artifacts are left untouched
 - `agent-installer uninstall <ids...>`
   - removes managed artifacts by id, for example `skill:review`
 - `agent-installer list`

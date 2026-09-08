@@ -30,6 +30,24 @@ function partitionInstallAllStates(states: ArtifactState[]): { installable: Arti
   };
 }
 
+// Thrown by installAllFromSource when an --only selector matches no discovered artifact.
+export class UnmatchedSelectorsError extends Error {
+  constructor(public readonly selectors: string[]) {
+    super(`No discovered artifact matches: ${selectors.join(", ")}`);
+    this.name = "UnmatchedSelectorsError";
+  }
+}
+
+function selectStates(states: ArtifactState[], only: string[]): ArtifactState[] {
+  const byId = new Map(states.map((state) => [state.id, state]));
+  const unmatched = only.filter((id) => !byId.has(id));
+  if (unmatched.length > 0) {
+    throw new UnmatchedSelectorsError([...new Set(unmatched)]);
+  }
+
+  return [...new Set(only)].map((id) => byId.get(id) as ArtifactState);
+}
+
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
     await fs.lstat(targetPath);
@@ -265,6 +283,7 @@ export async function removeArtifacts(ids: string[], home?: string): Promise<Man
 
 export interface InstallAllOptions {
   allowConflicts?: boolean;
+  only?: string[];
 }
 
 export interface InstallAllResult {
@@ -291,7 +310,8 @@ export async function installAllFromSource(
       resolvedCommit: source.resolvedCommit
     }));
     const { states } = await collectArtifactStates(artifacts, home, source.sourceIdentity);
-    const { installable, conflicts } = partitionInstallAllStates(states);
+    const selectedStates = installOptions?.only === undefined ? states : selectStates(states, installOptions.only);
+    const { installable, conflicts } = partitionInstallAllStates(selectedStates);
 
     if (conflicts.length > 0 && installOptions?.allowConflicts !== true) {
       throw new InstallConflictError(conflicts);

@@ -54,6 +54,10 @@ function addRefOption(command: Command): Command {
   return command.option("--ref <ref>", "Git branch, tag, or commit to scan when the source is an HTTPS Git repository");
 }
 
+function collectOnly(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
 async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOptions, listLength?: number, ref?: string): Promise<void> {
   await withResolvedArtifactStates(inputPath, undefined, scanOptions, ref === undefined ? undefined : { ref }, async ({ states, removed }) => {
     const selection = await promptForSelections(states, removed, {
@@ -122,12 +126,18 @@ function createProgram(): Command {
     });
 
   addRefOption(addSkillMaxDepthOption(program.command("install")))
-    .description("Install or update all discovered artifacts from the source repository.")
+    .description("Install or update discovered artifacts from the source repository (--all or --only).")
     .argument("[path]", "Source repository to scan", process.cwd())
     .option("--all", "Install all discovered artifacts")
+    .option("--only <artifact-id>", "Install only this artifact id, for example skill:review (repeatable)", collectOnly, [])
     .option("--allow-conflicts", "Install eligible artifacts and skip conflicting ones instead of aborting")
-    .action(async (inputPath, options: ScanCommandOptions & { all?: boolean; allowConflicts?: boolean }) => {
-      if (!options.all) {
+    .action(async (inputPath, options: ScanCommandOptions & { all?: boolean; only: string[]; allowConflicts?: boolean }) => {
+      const only = options.only.length > 0 ? options.only : undefined;
+      if (options.all && only !== undefined) {
+        throw new Error("--all and --only are mutually exclusive.");
+      }
+
+      if (!options.all && only === undefined) {
         throw new Error("Use --all for non-interactive installation.");
       }
 
@@ -136,7 +146,7 @@ function createProgram(): Command {
         undefined,
         scanOptionsFromCommand(options),
         options.ref === undefined ? undefined : { ref: options.ref },
-        { allowConflicts: options.allowConflicts === true }
+        { allowConflicts: options.allowConflicts === true, ...(only === undefined ? {} : { only }) }
       );
 
       console.log(`installed/updated ${installed.length}`);
