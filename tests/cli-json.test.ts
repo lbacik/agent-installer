@@ -170,6 +170,42 @@ describe("install --json", () => {
     expect(parsed.installed).toEqual([]);
     expect(parsed.error).toMatch(/skill:missing/);
   });
+
+  it("reports pruned artifacts under their own category, distinct from installed and updated", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    await runCli(["install", repo, "--all"], home);
+
+    await fs.rm(path.join(repo, "prompts", "commit-message.md"));
+    const result = await runCli(["install", repo, "--all", "--prune", "--json"], home);
+
+    expect(result.exitCode).toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as {
+      installed: unknown[];
+      updated: unknown[];
+      pruned: Array<{ id: string }>;
+    };
+    expect(parsed.installed).toEqual([]);
+    expect(parsed.updated).toEqual([]);
+    expect(parsed.pruned.map((entry) => entry.id)).toEqual(["prompt:commit-message"]);
+  });
+
+  it("leaves source-missing artifacts installed and reports no pruned entries without --prune", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    await runCli(["install", repo, "--all"], home);
+
+    await fs.rm(path.join(repo, "prompts", "commit-message.md"));
+    const result = await runCli(["install", repo, "--all", "--json"], home);
+
+    expect(result.exitCode).toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as { pruned: unknown[] };
+    expect(parsed.pruned).toEqual([]);
+
+    const list = await runCli(["list", "--json"], home);
+    const listParsed = parseStdoutJson(list.stdout) as { artifacts: Array<{ id: string }> };
+    expect(listParsed.artifacts.map((artifact) => artifact.id)).toContain("prompt:commit-message");
+  });
 });
 
 describe("list --json", () => {

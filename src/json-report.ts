@@ -34,6 +34,7 @@ export interface InstallJsonOutput {
   updated: JsonArtifactRecord[];
   skipped: JsonArtifactRecord[];
   refused: JsonArtifactRecord[];
+  pruned: JsonArtifactRecord[];
   error?: string;
 }
 
@@ -128,7 +129,8 @@ export function buildArtifactsErrorJson(error: unknown): ScanJsonOutput {
 export async function buildInstallSuccessJson(
   states: ArtifactState[],
   installed: ManagedEntry[],
-  conflicts: ArtifactState[]
+  conflicts: ArtifactState[],
+  pruned: RemovedArtifactState[] = []
 ): Promise<InstallJsonOutput> {
   const statusById = new Map(states.map((state) => [state.id, state.status]));
   const installedRecords: JsonArtifactRecord[] = [];
@@ -148,7 +150,8 @@ export async function buildInstallSuccessJson(
     installed: installedRecords,
     updated: updatedRecords,
     skipped: conflicts.map(artifactStateToJson),
-    refused: []
+    refused: [],
+    pruned: pruned.map(removedArtifactStateToJson)
   };
 }
 
@@ -159,6 +162,7 @@ export function buildInstallErrorJson(error: unknown, refused: ArtifactState[] =
     updated: [],
     skipped: [],
     refused: refused.map(artifactStateToJson),
+    pruned: [],
     error: messageOf(error)
   };
 }

@@ -284,12 +284,14 @@ export async function removeArtifacts(ids: string[], home?: string): Promise<Man
 export interface InstallAllOptions {
   allowConflicts?: boolean;
   only?: string[];
+  prune?: boolean;
 }
 
 export interface InstallAllResult {
   states: ArtifactState[];
   installed: ManagedEntry[];
   conflicts: ArtifactState[];
+  pruned: RemovedArtifactState[];
 }
 
 export async function installAllFromSource(
@@ -309,7 +311,7 @@ export async function installAllFromSource(
       requestedRef: source.requestedRef,
       resolvedCommit: source.resolvedCommit
     }));
-    const { states } = await collectArtifactStates(artifacts, home, source.sourceIdentity);
+    const { states, removed } = await collectArtifactStates(artifacts, home, source.sourceIdentity);
     const selectedStates = installOptions?.only === undefined ? states : selectStates(states, installOptions.only);
     const { installable, conflicts } = partitionInstallAllStates(selectedStates);
 
@@ -318,7 +320,14 @@ export async function installAllFromSource(
     }
 
     const installed = await installArtifacts(installable, home);
-    return { states, installed, conflicts };
+
+    let pruned: RemovedArtifactState[] = [];
+    if (installOptions?.prune === true && removed.length > 0) {
+      await removeArtifacts(removed.map((entry) => entry.id), home);
+      pruned = removed;
+    }
+
+    return { states, installed, conflicts, pruned };
   } finally {
     await source.cleanup();
   }

@@ -235,6 +235,21 @@ agent-installer install [path] --only skill:review --only prompt:commit-message
 Selection is applied to the reconciled set, so conflict handling behaves exactly as it does under `--all`, including
 `--allow-conflicts`. Unselected artifacts are left untouched.
 
+Remove managed artifacts that the scanned source no longer offers (`source-missing`), so the base store ends up
+containing exactly what the source declares and nothing else:
+
+```bash
+agent-installer install [path] --all --prune
+```
+
+**`--prune` deletes managed files.** It removes the base-store copy, the Claude exposure symlink, and the state entry
+for every artifact reconciled as `source-missing` for the scanned source. Pruning is opt-in and off by default: a
+skipped artifact is recoverable with a later `install`, a pruned one is not, and scanning a legitimately narrower
+source would otherwise turn a mistyped path into data loss. `--prune` combines with `--only`, pruning only what the
+source no longer offers; a merely-unselected artifact that the source still discovers is left installed. Pruning is
+also scoped to the scanned source identity: artifacts owned by a different source are never touched, and advancing
+`--ref` on a remote source does not prune the previously installed artifacts, since they reconcile as updates instead.
+
 Install or update everything found from a remote ref:
 
 ```bash
@@ -302,7 +317,7 @@ Each artifact entry carries: `id`, `kind`, `name`, `status`, `sourceIdentity`, `
 `artifacts` includes `source-missing` entries: managed artifacts no longer present in the currently scanned source
 repository.
 
-`install --json` reports what happened to each discovered artifact, split into four id-addressable arrays:
+`install --json` reports what happened to each discovered artifact, split into five id-addressable arrays:
 
 ```json
 {
@@ -310,7 +325,8 @@ repository.
   "installed": [],
   "updated": [],
   "skipped": [],
-  "refused": []
+  "refused": [],
+  "pruned": []
 }
 ```
 
@@ -321,6 +337,7 @@ repository.
   `updated` are empty in that case, and the object carries an `error` string. A non-conflict abort, such as an
   unmatched `--only` selector, reports the same empty arrays and `error` string with `refused` left empty, since no
   discovered artifact is implicated.
+- `pruned`: `source-missing` artifacts removed because `--prune` was passed; always empty without that flag.
 
 `list --json` reports the currently managed entries without re-scanning the source repository, so `status` reflects
 whether the base-store copy still matches what was installed and whether its Claude exposure symlink is intact, not

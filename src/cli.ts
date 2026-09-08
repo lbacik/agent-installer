@@ -167,10 +167,20 @@ function createProgram(): Command {
     .option("--all", "Install all discovered artifacts")
     .option("--only <artifact-id>", "Install only this artifact id, for example skill:review (repeatable)", collectOnly, [])
     .option("--allow-conflicts", "Install eligible artifacts and skip conflicting ones instead of aborting")
+    .option(
+      "--prune",
+      "Remove managed artifacts no longer present in the scanned source (deletes their base-store copy, exposure symlink, and state entry)"
+    )
     .action(
       async (
         inputPath,
-        options: ScanCommandOptions & { all?: boolean; only: string[]; allowConflicts?: boolean; json?: boolean }
+        options: ScanCommandOptions & {
+          all?: boolean;
+          only: string[];
+          allowConflicts?: boolean;
+          prune?: boolean;
+          json?: boolean;
+        }
       ) => {
         const json = options.json === true;
         try {
@@ -183,22 +193,33 @@ function createProgram(): Command {
             throw new Error("Use --all for non-interactive installation.");
           }
 
-          const { states, installed, conflicts } = await installAllFromSource(
+          const { states, installed, conflicts, pruned } = await installAllFromSource(
             inputPath,
             undefined,
             scanOptionsFromCommand(options),
             options.ref === undefined ? undefined : { ref: options.ref },
-            { allowConflicts: options.allowConflicts === true, ...(only === undefined ? {} : { only }) }
+            {
+              allowConflicts: options.allowConflicts === true,
+              prune: options.prune === true,
+              ...(only === undefined ? {} : { only })
+            }
           );
 
           if (json) {
-            printJson(await buildInstallSuccessJson(states, installed, conflicts));
+            printJson(await buildInstallSuccessJson(states, installed, conflicts, pruned));
             return;
           }
 
           console.log(`installed/updated ${installed.length}`);
           for (const state of conflicts) {
             console.error(`skipped ${formatConflictLine(state)}`);
+          }
+
+          if (pruned.length > 0) {
+            console.log(`pruned ${pruned.length}`);
+            for (const entry of pruned) {
+              console.log(formatOperationLine("removed", entry.id));
+            }
           }
         } catch (error) {
           if (!json) {
