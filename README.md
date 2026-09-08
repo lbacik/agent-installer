@@ -191,6 +191,12 @@ Show scan results only:
 agent-installer scan [path]
 ```
 
+Print scan results as JSON instead:
+
+```bash
+agent-installer scan [path] --json
+```
+
 Show scan results for a remote tag, branch, or commit:
 
 ```bash
@@ -235,6 +241,12 @@ Install or update everything found from a remote ref:
 agent-installer install https://github.com/org/agents.git --ref main --all
 ```
 
+Report the result as JSON instead of the human-readable summary:
+
+```bash
+agent-installer install [path] --all --json
+```
+
 Remove managed entries by id:
 
 ```bash
@@ -251,6 +263,76 @@ Limit the visible interactive list length:
 
 ```bash
 agent-installer list --list-length 12
+```
+
+Print managed entries as JSON instead of opening the interactive selection UI:
+
+```bash
+agent-installer list --json
+```
+
+### Machine-Readable JSON Output
+
+`scan`, `install`, and `list` accept `--json`. Under `--json`:
+
+- stdout carries exactly one JSON object and nothing else; all human-readable progress, warnings, and errors move to
+  stderr.
+- The object always carries `schemaVersion: 1`, so a later shape change cannot break a consumer silently.
+- Exit statuses are unchanged. A strict-mode abort (an unmanaged conflict without `--allow-conflicts`, or an
+  `--only` selector that matches nothing) still exits non-zero, and still prints a JSON object on stdout describing
+  the refusal via an `error` string.
+- `list --json` prints the managed entries and exits; it never opens the interactive UI, so it produces output with
+  no TTY attached.
+
+Each artifact entry carries: `id`, `kind`, `name`, `status`, `sourceIdentity`, `relativeSourcePath`, `basePath`,
+`exposurePath`, `sourceHash`, `installedHash`, and, when installed from a remote Git ref, `requestedRef` and
+`resolvedCommit`. A `conflict` entry also carries `conflictReason` and `conflictPath`.
+
+`scan --json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "artifacts": [
+    { "id": "skill:review", "kind": "skill", "name": "review", "status": "new", "...": "..." }
+  ]
+}
+```
+
+`artifacts` includes `source-missing` entries: managed artifacts no longer present in the currently scanned source
+repository.
+
+`install --json` reports what happened to each discovered artifact, split into four id-addressable arrays:
+
+```json
+{
+  "schemaVersion": 1,
+  "installed": [],
+  "updated": [],
+  "skipped": [],
+  "refused": []
+}
+```
+
+- `installed`: artifacts that had never been installed before and now are.
+- `updated`: previously installed artifacts whose source or exposure had drifted, now reinstalled.
+- `skipped`: conflicting artifacts left untouched because `--allow-conflicts` was passed.
+- `refused`: conflicting artifacts that caused the whole run to abort (no `--allow-conflicts`); `installed` and
+  `updated` are empty in that case, and the object carries an `error` string. A non-conflict abort, such as an
+  unmatched `--only` selector, reports the same empty arrays and `error` string with `refused` left empty, since no
+  discovered artifact is implicated.
+
+`list --json` reports the currently managed entries without re-scanning the source repository, so `status` reflects
+whether the base-store copy still matches what was installed and whether its Claude exposure symlink is intact, not
+whether the upstream source has since changed:
+
+```json
+{
+  "schemaVersion": 1,
+  "artifacts": [
+    { "id": "skill:review", "kind": "skill", "name": "review", "status": "installed-same", "...": "..." }
+  ]
+}
 ```
 
 ## Typical Workflow

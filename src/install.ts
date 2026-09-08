@@ -86,7 +86,7 @@ async function copyArtifact(artifact: DiscoveredArtifact, basePath: string): Pro
   await fs.copyFile(artifact.sourcePath, basePath);
 }
 
-async function readSymlinkTarget(targetPath: string): Promise<string | null> {
+export async function readSymlinkTarget(targetPath: string): Promise<string | null> {
   try {
     return await fs.readlink(targetPath);
   } catch {
