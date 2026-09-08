@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { formatConflictLine } from "./format.js";
 import { hashArtifact } from "./hash.js";
 import { artifactId, getBasePath, getExposurePath, getMarkerPath, resolveTargetPaths, TargetPaths } from "./paths.js";
 import { materializeOverlay, resolveInvocationPolicyOverlay } from "./skill-invocation-policy.js";
@@ -7,6 +8,27 @@ import { loadState, saveState } from "./state.js";
 import type { ScanSourceOptions } from "./source.js";
 import { resolveSourceInput, type ResolveSourceOptions } from "./source-resolver.js";
 import { ArtifactState, DiscoveredArtifact, ManagedEntry, OverlayFile, RemovedArtifactState } from "./types.js";
+
+// Thrown by installAllFromSource when unmanaged conflicts block the install and --allow-conflicts was not passed.
+export class InstallConflictError extends Error {
+  constructor(public readonly conflicts: ArtifactState[]) {
+    super(
+      [
+        `Refusing to install: ${conflicts.length} artifact(s) conflict with unmanaged targets.`,
+        ...conflicts.map((state) => `  ${formatConflictLine(state)}`),
+        "Use --allow-conflicts to install the remaining eligible artifacts and skip these."
+      ].join("\n")
+    );
+    this.name = "InstallConflictError";
+  }
+}
+
+function partitionInstallAllStates(states: ArtifactState[]): { installable: ArtifactState[]; conflicts: ArtifactState[] } {
+  return {
+    installable: states.filter((state) => state.status === "new" || state.status === "installed-different"),
+    conflicts: states.filter((state) => state.status === "conflict")
+  };
+}
 
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
@@ -112,6 +134,7 @@ export async function collectArtifactStates(
     let status: ArtifactState["status"] = "new";
     let installedHash: string | null = null;
     let conflictReason: string | undefined;
+    let conflictPath: string | undefined;
 
     const baseExists = await pathExists(basePath);
     const exposureExists = await pathExists(exposurePath);
@@ -125,21 +148,27 @@ export async function collectArtifactStates(
 
       const symlinkTarget = exposureExists ? await readSymlinkTarget(exposurePath) : null;
       const expectedTarget = basePath;
-      const exposureValid = !exposureExists || symlinkTarget === expectedTarget;
+      const exposureMatches = exposureExists && symlinkTarget === expectedTarget;
+      const exposureConflict = exposureExists && !exposureMatches;
 
-      if (!exposureValid) {
+      if (exposureConflict) {
         status = "conflict";
         conflictReason = `Exposure path already exists and does not point to "${expectedTarget}".`;
-      } else if (installedHash === sourceHash) {
+        conflictPath = exposurePath;
+      } else if (installedHash === sourceHash && exposureMatches) {
         status = "installed-same";
       } else {
         status = "installed-different";
       }
     } else {
       status = "conflict";
-      conflictReason = "A target path already exists but is not managed by this installer.";
       if (baseExists) {
+        conflictReason = "A target path already exists but is not managed by this installer.";
+        conflictPath = basePath;
         installedHash = await hashArtifact(artifact.kind, basePath);
+      } else {
+        conflictReason = "The Claude exposure path already exists but is not managed by this installer.";
+        conflictPath = exposurePath;
       }
     }
 
@@ -156,6 +185,10 @@ export async function collectArtifactStates(
 
     if (conflictReason !== undefined) {
       nextState.conflictReason = conflictReason;
+    }
+
+    if (conflictPath !== undefined) {
+      nextState.conflictPath = conflictPath;
     }
 
     states.push(nextState);
@@ -228,12 +261,23 @@ export async function removeArtifacts(ids: string[], home?: string): Promise<Man
   return removed;
 }
 
+export interface InstallAllOptions {
+  allowConflicts?: boolean;
+}
+
+export interface InstallAllResult {
+  states: ArtifactState[];
+  installed: ManagedEntry[];
+  conflicts: ArtifactState[];
+}
+
 export async function installAllFromSource(
   sourcePath: string,
   home?: string,
   scanOptions?: ScanSourceOptions,
-  resolveOptions?: ResolveSourceOptions
-): Promise<ArtifactState[]> {
+  resolveOptions?: ResolveSourceOptions,
+  installOptions?: InstallAllOptions
+): Promise<InstallAllResult> {
   const { scanSourceRepository } = await import("./source.js");
   const source = await resolveSourceInput(sourcePath, resolveOptions);
 
@@ -243,9 +287,14 @@ export async function installAllFromSource(
       sourceRoot: source.sourceIdentity
     }));
     const { states } = await collectArtifactStates(artifacts, home, source.sourceIdentity);
-    const installable = states.filter((state) => state.status === "new" || state.status === "installed-different");
-    await installArtifacts(installable, home);
-    return states;
+    const { installable, conflicts } = partitionInstallAllStates(states);
+
+    if (conflicts.length > 0 && installOptions?.allowConflicts !== true) {
+      throw new InstallConflictError(conflicts);
+    }
+
+    const installed = await installArtifacts(installable, home);
+    return { states, installed, conflicts };
   } finally {
     await source.cleanup();
   }

@@ -55,3 +55,7 @@ export function formatManagedEntryLines(entries: ManagedEntry[]): string[] {
 export function formatOperationLine(action: "created" | "updated" | "removed", id: string): string {
   return `${action} ${id}`;
 }
+
+export function formatConflictLine(state: ArtifactState): string {
+  return `${state.id} -> ${state.conflictPath ?? state.basePath}`;
+}

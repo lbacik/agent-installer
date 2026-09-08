@@ -74,6 +74,23 @@ describe("scanSourceRepository", () => {
     await expect(scanSourceRepository(repo)).rejects.toThrow('Duplicate prompt or command name "foo"');
   });
 
+  it("discovers a skill containing a symlink; the symlink is only rejected later, when hashing", async () => {
+    const repo = await makeRepo();
+    await fs.mkdir(path.join(repo, "skills", "linked"), { recursive: true });
+    await fs.writeFile(path.join(repo, "skills", "linked", "SKILL.md"), "# Linked\n", "utf8");
+    await fs.writeFile(path.join(repo, "skills", "linked", "target.txt"), "content\n", "utf8");
+    await fs.symlink(
+      path.join(repo, "skills", "linked", "target.txt"),
+      path.join(repo, "skills", "linked", "shortcut.txt")
+    );
+
+    const result = await scanSourceRepository(repo);
+
+    expect(result).toEqual([
+      expect.objectContaining({ kind: "skill", name: "linked", relativeSourcePath: "skills/linked" })
+    ]);
+  });
+
   it("errors when recursive skill discovery finds duplicate skill names", async () => {
     const repo = await makeRepo();
     await fs.mkdir(path.join(repo, "skills", "engineering", "review"), { recursive: true });

@@ -38,6 +38,8 @@ export interface ArtifactState {
   status: ArtifactStatus;
   managedEntry: ManagedEntry | null;
   conflictReason?: string;
+  /** The specific filesystem path (basePath or exposurePath) that a "conflict" status refers to. */
+  conflictPath?: string;
 }
 
 export interface RemovedArtifactState {
