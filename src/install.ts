@@ -148,13 +148,14 @@ export async function collectArtifactStates(
 
       const symlinkTarget = exposureExists ? await readSymlinkTarget(exposurePath) : null;
       const expectedTarget = basePath;
-      const exposureValid = !exposureExists || symlinkTarget === expectedTarget;
+      const exposureMatches = exposureExists && symlinkTarget === expectedTarget;
+      const exposureConflict = exposureExists && !exposureMatches;
 
-      if (!exposureValid) {
+      if (exposureConflict) {
         status = "conflict";
         conflictReason = `Exposure path already exists and does not point to "${expectedTarget}".`;
         conflictPath = exposurePath;
-      } else if (installedHash === sourceHash) {
+      } else if (installedHash === sourceHash && exposureMatches) {
         status = "installed-same";
       } else {
         status = "installed-different";

@@ -99,10 +99,10 @@ Artifacts are reconciled into these states:
 Meaning:
 
 - `new`: not installed yet
-- `installed-same`: managed install matches the source content hash
-- `installed-different`: managed install exists but source content changed
+- `installed-same`: managed install matches the source content hash and the Claude exposure symlink is present and points at the managed base path
+- `installed-different`: managed install exists but source content changed, or the Claude exposure symlink is missing; a missing exposure counts as drift, not a match, even when the base-store content is unchanged
 - `source-missing`: previously managed entry is no longer present in the currently scanned source repository
-- `conflict`: target path exists but is not managed by this tool, or the Claude exposure symlink points elsewhere
+- `conflict`: target path exists but is not managed by this tool, or the Claude exposure path exists but is not a symlink to the expected managed base path
 
 Reconciliation has no status for an unusable source. A skill whose Claude frontmatter enables the Codex invocation-policy translation but whose authored `agents/openai.yaml` cannot be parsed aborts the whole run, including `scan`, with a source-configuration error, so no managed artifact is created or changed from an ambiguous configuration.
 
