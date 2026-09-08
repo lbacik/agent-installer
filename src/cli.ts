@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { collectArtifactStates, installArtifacts, removeArtifacts } from "./install.js";
-import { formatArtifactLine, formatOperationLine, formatRemovedLine } from "./format.js";
+import { installAllFromSource, installArtifacts, removeArtifacts } from "./install.js";
+import { formatArtifactLine, formatConflictLine, formatOperationLine, formatRemovedLine } from "./format.js";
 import { promptForManagedArtifactRemovals, promptForSelections } from "./interactive.js";
 import { resolveTargetPaths } from "./paths.js";
 import { loadState } from "./state.js";
@@ -125,22 +125,24 @@ function createProgram(): Command {
     .description("Install or update all discovered artifacts from the source repository.")
     .argument("[path]", "Source repository to scan", process.cwd())
     .option("--all", "Install all discovered artifacts")
-    .action(async (inputPath, options: ScanCommandOptions & { all?: boolean }) => {
+    .option("--allow-conflicts", "Install eligible artifacts and skip conflicting ones instead of aborting")
+    .action(async (inputPath, options: ScanCommandOptions & { all?: boolean; allowConflicts?: boolean }) => {
       if (!options.all) {
         throw new Error("Use --all for non-interactive installation.");
       }
 
-      await withResolvedArtifactStates(
+      const { installed, conflicts } = await installAllFromSource(
         inputPath,
         undefined,
         scanOptionsFromCommand(options),
         options.ref === undefined ? undefined : { ref: options.ref },
-        async ({ states }) => {
-          const installable = states.filter((state) => state.status === "new" || state.status === "installed-different");
-          await installArtifacts(installable);
-          console.log(`installed/updated ${installable.length}`);
-        }
+        { allowConflicts: options.allowConflicts === true }
       );
+
+      console.log(`installed/updated ${installed.length}`);
+      for (const state of conflicts) {
+        console.error(`skipped ${formatConflictLine(state)}`);
+      }
     });
 
   program

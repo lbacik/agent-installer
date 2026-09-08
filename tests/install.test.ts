@@ -197,7 +197,7 @@ describe("install lifecycle", () => {
       await fs.writeFile(path.join(checkout, "prompts", "commit-message.md"), "commit prompt\n", "utf8");
     };
 
-    const states = await installAllFromSource(
+    const { states } = await installAllFromSource(
       "https://token:secret@github.com/org/repo.git?access_token=abc",
       home,
       undefined,
@@ -230,6 +230,86 @@ describe("install lifecycle", () => {
 
     await expect(fs.access(path.join(paths.agentsPromptsDir, "commit-message.md"))).rejects.toMatchObject({ code: "ENOENT" });
     expect(await fs.readFile(path.join(paths.agentsSkillsDir, "custom", "SKILL.md"), "utf8")).toContain("# Custom");
+  });
+});
+
+describe("install --all conflict handling", () => {
+  it("aborts and installs nothing when every artifact conflicts", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    await fs.mkdir(path.join(paths.agentsSkillsDir, "review"), { recursive: true });
+    await fs.writeFile(path.join(paths.agentsSkillsDir, "review", "SKILL.md"), "user-owned\n", "utf8");
+    await fs.mkdir(paths.agentsPromptsDir, { recursive: true });
+    await fs.writeFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "user-owned\n", "utf8");
+
+    await expect(installAllFromSource(repo, home)).rejects.toThrow(/skill:review/);
+    await expect(installAllFromSource(repo, home)).rejects.toThrow(/prompt:commit-message/);
+
+    const state = await loadState(paths);
+    expect(state.entries).toEqual([]);
+    expect(await fs.readFile(path.join(paths.agentsSkillsDir, "review", "SKILL.md"), "utf8")).toBe("user-owned\n");
+    expect(await fs.readFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "utf8")).toBe("user-owned\n");
+  });
+
+  it("aborts without installing the eligible artifact when only one artifact conflicts", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    await fs.mkdir(paths.agentsPromptsDir, { recursive: true });
+    await fs.writeFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "user-owned\n", "utf8");
+
+    await expect(installAllFromSource(repo, home)).rejects.toThrow(/prompt:commit-message/);
+
+    const state = await loadState(paths);
+    expect(state.entries).toEqual([]);
+    await expect(fs.access(path.join(paths.agentsSkillsDir, "review"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("installs the eligible artifacts and reports the skipped conflict with allowConflicts", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    await fs.mkdir(paths.agentsPromptsDir, { recursive: true });
+    await fs.writeFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "user-owned\n", "utf8");
+
+    const { installed, conflicts } = await installAllFromSource(repo, home, undefined, undefined, { allowConflicts: true });
+
+    expect(installed.map((entry) => entry.id)).toEqual(["skill:review"]);
+    expect(conflicts.map((state) => state.id)).toEqual(["prompt:commit-message"]);
+
+    const state = await loadState(paths);
+    expect(state.entries.map((entry) => entry.id)).toEqual(["skill:review"]);
+    expect(await fs.readFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "utf8")).toBe("user-owned\n");
+  });
+
+  it("names the exposure path, not the (nonexistent) base path, when only the Claude symlink conflicts", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    const foreignTarget = await makeTempDir("agent-installer-foreign-");
+    await fs.mkdir(paths.claudeSkillsDir, { recursive: true });
+    await fs.symlink(foreignTarget, path.join(paths.claudeSkillsDir, "review"));
+
+    await expect(installAllFromSource(repo, home)).rejects.toThrow(path.join(paths.claudeSkillsDir, "review"));
+
+    const state = await loadState(paths);
+    expect(state.entries).toEqual([]);
+    await expect(fs.access(path.join(paths.agentsSkillsDir, "review"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("names the exposure path when an already-managed artifact's Claude symlink is replaced by something else", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+
+    await installAllFromSource(repo, home);
+
+    const foreignTarget = await makeTempDir("agent-installer-foreign-");
+    await fs.rm(path.join(paths.claudeSkillsDir, "review"), { recursive: true, force: true });
+    await fs.symlink(foreignTarget, path.join(paths.claudeSkillsDir, "review"));
+
+    await expect(installAllFromSource(repo, home)).rejects.toThrow(path.join(paths.claudeSkillsDir, "review"));
   });
 });
 
@@ -342,7 +422,7 @@ describe("codex invocation policy translation", () => {
       );
     };
 
-    const states = await installAllFromSource("https://github.com/org/repo.git", home, undefined, { ref: "main", git });
+    const { states } = await installAllFromSource("https://github.com/org/repo.git", home, undefined, { ref: "main", git });
 
     const paths = resolveTargetPaths(home);
     expect(states.map((state) => state.id)).toEqual(["skill:restricted"]);

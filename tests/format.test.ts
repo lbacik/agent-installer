@@ -1,9 +1,14 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { formatInteractiveStartupArtifactLines, formatManagedEntryLines, formatOperationLine } from "../src/format.js";
+import { formatConflictLine, formatInteractiveStartupArtifactLines, formatManagedEntryLines, formatOperationLine } from "../src/format.js";
 import type { ArtifactState, ManagedEntry } from "../src/types.js";
 
-function makeState(id: string, status: ArtifactState["status"], conflictReason?: string): ArtifactState {
+function makeState(
+  id: string,
+  status: ArtifactState["status"],
+  conflictReason?: string,
+  conflictPath?: string
+): ArtifactState {
   const [kind, name] = id.split(":") as [ArtifactState["artifact"]["kind"], string];
 
   return {
@@ -21,7 +26,8 @@ function makeState(id: string, status: ArtifactState["status"], conflictReason?:
     installedHash: status === "new" ? null : "installed-hash",
     status,
     managedEntry: null,
-    ...(conflictReason === undefined ? {} : { conflictReason })
+    ...(conflictReason === undefined ? {} : { conflictReason }),
+    ...(conflictPath === undefined ? {} : { conflictPath })
   };
 }
 
@@ -112,5 +118,24 @@ describe("formatOperationLine", () => {
     expect(formatOperationLine("created", "skill:review")).toBe("created skill:review");
     expect(formatOperationLine("updated", "skill:review")).toBe("updated skill:review");
     expect(formatOperationLine("removed", "skill:review")).toBe("removed skill:review");
+  });
+});
+
+describe("formatConflictLine", () => {
+  it("prints the artifact id and its base-store target path", () => {
+    const state = makeState("skill:review", "conflict", "A target path already exists but is not managed by this installer.");
+
+    expect(formatConflictLine(state)).toBe("skill:review -> /home/.agents/skills/review");
+  });
+
+  it("prints the exposure path instead when the conflict is about the Claude symlink, not the base store", () => {
+    const state = makeState(
+      "skill:review",
+      "conflict",
+      'Exposure path already exists and does not point to "/home/.agents/skills/review".',
+      "/home/.claude/skills/review"
+    );
+
+    expect(formatConflictLine(state)).toBe("skill:review -> /home/.claude/skills/review");
   });
 });

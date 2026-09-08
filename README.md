@@ -209,6 +209,14 @@ Install or update everything found:
 agent-installer install [path] --all
 ```
 
+By default, `install --all` aborts with a non-zero exit and installs nothing if any discovered artifact is a `conflict`
+(a target path exists but is not managed by this installer). Pass `--allow-conflicts` to install the remaining eligible
+artifacts anyway; skipped conflicts are still reported on stderr.
+
+```bash
+agent-installer install [path] --all --allow-conflicts
+```
+
 Install or update everything found from a remote ref:
 
 ```bash

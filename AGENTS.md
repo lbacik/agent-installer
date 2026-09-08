@@ -78,6 +78,9 @@ Implemented commands:
   - prints discovered artifact status only
 - `agent-installer install [path] --all`
   - non-interactive install or update of all eligible artifacts
+  - aborts with a non-zero exit and installs nothing if the reconciled set includes a `conflict`, naming every
+    conflicting id and its target path
+  - `--allow-conflicts` installs the eligible artifacts anyway and reports the skipped conflicting ids on stderr
 - `agent-installer uninstall <ids...>`
   - removes managed artifacts by id, for example `skill:review`
 - `agent-installer list`
