@@ -111,7 +111,7 @@ export async function promptForSelections(
               ...(context.clearPromptOnDone === undefined ? {} : { clearPromptOnDone: context.clearPromptOnDone }),
               theme: {
                 style: {
-                  disabledChoice: (text: string) => pc.dim(` ${text}`)
+                  disabled: (text: string) => pc.dim(` ${text}`)
                 }
               },
               choices: states.map((state) => ({
