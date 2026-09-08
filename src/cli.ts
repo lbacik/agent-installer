@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { InstallConflictError, installAllFromSource, installArtifacts, removeArtifacts } from "./install.js";
 import { formatArtifactLine, formatConflictLine, formatOperationLine, formatRemovedLine } from "./format.js";
@@ -73,6 +76,13 @@ function collectOnly(value: string, previous: string[]): string[] {
   return [...previous, value];
 }
 
+function readPackageVersion(): string {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const packageJsonPath = path.join(moduleDir, "..", "package.json");
+  const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string };
+  return packageJson.version;
+}
+
 async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOptions, listLength?: number, ref?: string): Promise<void> {
   await withResolvedArtifactStates(inputPath, undefined, scanOptions, ref === undefined ? undefined : { ref }, async ({ states, removed }) => {
     const selection = await promptForSelections(states, removed, {
@@ -113,6 +123,7 @@ function createProgram(): Command {
   addRefOption(addSkillMaxDepthOption(program))
     .name("agent-installer")
     .description("Install Codex skills and Claude Code skills and commands from a local or HTTPS Git repository.")
+    .version(readPackageVersion(), "-v, --version", "Output the installed CLI version")
     .argument("[path]", "Source repository to scan", process.cwd())
     .option(
       "--list-length <count>",
