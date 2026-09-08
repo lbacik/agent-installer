@@ -30,6 +30,24 @@ function partitionInstallAllStates(states: ArtifactState[]): { installable: Arti
   };
 }
 
+// Thrown by installAllFromSource when an --only selector matches no discovered artifact.
+export class UnmatchedSelectorsError extends Error {
+  constructor(public readonly selectors: string[]) {
+    super(`No discovered artifact matches: ${selectors.join(", ")}`);
+    this.name = "UnmatchedSelectorsError";
+  }
+}
+
+function selectStates(states: ArtifactState[], only: string[]): ArtifactState[] {
+  const byId = new Map(states.map((state) => [state.id, state]));
+  const unmatched = only.filter((id) => !byId.has(id));
+  if (unmatched.length > 0) {
+    throw new UnmatchedSelectorsError([...new Set(unmatched)]);
+  }
+
+  return [...new Set(only)].map((id) => byId.get(id) as ArtifactState);
+}
+
 async function pathExists(targetPath: string): Promise<boolean> {
   try {
     await fs.lstat(targetPath);
@@ -68,7 +86,7 @@ async function copyArtifact(artifact: DiscoveredArtifact, basePath: string): Pro
   await fs.copyFile(artifact.sourcePath, basePath);
 }
 
-async function readSymlinkTarget(targetPath: string): Promise<string | null> {
+export async function readSymlinkTarget(targetPath: string): Promise<string | null> {
   try {
     return await fs.readlink(targetPath);
   } catch {
@@ -105,7 +123,9 @@ function buildManagedEntry(
     exposurePath: getExposurePath(paths, artifact),
     sourceHash,
     installedHash,
-    installedAt: new Date().toISOString()
+    installedAt: new Date().toISOString(),
+    requestedRef: artifact.requestedRef,
+    resolvedCommit: artifact.resolvedCommit
   };
 }
 
@@ -234,7 +254,7 @@ export async function installArtifacts(states: ArtifactState[], home?: string): 
     installed.push(entry);
   }
 
-  await saveState(paths, { version: 1, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
+  await saveState(paths, { version: 2, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
   return installed;
 }
 
@@ -257,18 +277,21 @@ export async function removeArtifacts(ids: string[], home?: string): Promise<Man
     removed.push(entry);
   }
 
-  await saveState(paths, { version: 1, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
+  await saveState(paths, { version: 2, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
   return removed;
 }
 
 export interface InstallAllOptions {
   allowConflicts?: boolean;
+  only?: string[];
+  prune?: boolean;
 }
 
 export interface InstallAllResult {
   states: ArtifactState[];
   installed: ManagedEntry[];
   conflicts: ArtifactState[];
+  pruned: RemovedArtifactState[];
 }
 
 export async function installAllFromSource(
@@ -284,17 +307,27 @@ export async function installAllFromSource(
   try {
     const artifacts = (await scanSourceRepository(source.scanRoot, scanOptions)).map((artifact) => ({
       ...artifact,
-      sourceRoot: source.sourceIdentity
+      sourceRoot: source.sourceIdentity,
+      requestedRef: source.requestedRef,
+      resolvedCommit: source.resolvedCommit
     }));
-    const { states } = await collectArtifactStates(artifacts, home, source.sourceIdentity);
-    const { installable, conflicts } = partitionInstallAllStates(states);
+    const { states, removed } = await collectArtifactStates(artifacts, home, source.sourceIdentity);
+    const selectedStates = installOptions?.only === undefined ? states : selectStates(states, installOptions.only);
+    const { installable, conflicts } = partitionInstallAllStates(selectedStates);
 
     if (conflicts.length > 0 && installOptions?.allowConflicts !== true) {
       throw new InstallConflictError(conflicts);
     }
 
     const installed = await installArtifacts(installable, home);
-    return { states, installed, conflicts };
+
+    let pruned: RemovedArtifactState[] = [];
+    if (installOptions?.prune === true && removed.length > 0) {
+      await removeArtifacts(removed.map((entry) => entry.id), home);
+      pruned = removed;
+    }
+
+    return { states, installed, conflicts, pruned };
   } finally {
     await source.cleanup();
   }

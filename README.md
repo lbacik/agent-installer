@@ -191,6 +191,12 @@ Show scan results only:
 agent-installer scan [path]
 ```
 
+Print scan results as JSON instead:
+
+```bash
+agent-installer scan [path] --json
+```
+
 Show scan results for a remote tag, branch, or commit:
 
 ```bash
@@ -217,10 +223,43 @@ artifacts anyway; skipped conflicts are still reported on stderr.
 agent-installer install [path] --all --allow-conflicts
 ```
 
+Install or update an exact subset by repeating `--only <artifact-id>` (the same id vocabulary `uninstall` and `list`
+use, for example `skill:review` or `prompt:commit-message`). `--only` and `--all` are mutually exclusive, and every
+selector must match a discovered artifact or the run aborts with a non-zero exit and installs nothing, naming the
+unmatched selectors:
+
+```bash
+agent-installer install [path] --only skill:review --only prompt:commit-message
+```
+
+Selection is applied to the reconciled set, so conflict handling behaves exactly as it does under `--all`, including
+`--allow-conflicts`. Unselected artifacts are left untouched.
+
+Remove managed artifacts that the scanned source no longer offers (`source-missing`), so the base store ends up
+containing exactly what the source declares and nothing else:
+
+```bash
+agent-installer install [path] --all --prune
+```
+
+**`--prune` deletes managed files.** It removes the base-store copy, the Claude exposure symlink, and the state entry
+for every artifact reconciled as `source-missing` for the scanned source. Pruning is opt-in and off by default: a
+skipped artifact is recoverable with a later `install`, a pruned one is not, and scanning a legitimately narrower
+source would otherwise turn a mistyped path into data loss. `--prune` combines with `--only`, pruning only what the
+source no longer offers; a merely-unselected artifact that the source still discovers is left installed. Pruning is
+also scoped to the scanned source identity: artifacts owned by a different source are never touched, and advancing
+`--ref` on a remote source does not prune the previously installed artifacts, since they reconcile as updates instead.
+
 Install or update everything found from a remote ref:
 
 ```bash
 agent-installer install https://github.com/org/agents.git --ref main --all
+```
+
+Report the result as JSON instead of the human-readable summary:
+
+```bash
+agent-installer install [path] --all --json
 ```
 
 Remove managed entries by id:
@@ -241,6 +280,78 @@ Limit the visible interactive list length:
 agent-installer list --list-length 12
 ```
 
+Print managed entries as JSON instead of opening the interactive selection UI:
+
+```bash
+agent-installer list --json
+```
+
+### Machine-Readable JSON Output
+
+`scan`, `install`, and `list` accept `--json`. Under `--json`:
+
+- stdout carries exactly one JSON object and nothing else; all human-readable progress, warnings, and errors move to
+  stderr.
+- The object always carries `schemaVersion: 1`, so a later shape change cannot break a consumer silently.
+- Exit statuses are unchanged. A strict-mode abort (an unmanaged conflict without `--allow-conflicts`, or an
+  `--only` selector that matches nothing) still exits non-zero, and still prints a JSON object on stdout describing
+  the refusal via an `error` string.
+- `list --json` prints the managed entries and exits; it never opens the interactive UI, so it produces output with
+  no TTY attached.
+
+Each artifact entry carries: `id`, `kind`, `name`, `status`, `sourceIdentity`, `relativeSourcePath`, `basePath`,
+`exposurePath`, `sourceHash`, `installedHash`, and, when installed from a remote Git ref, `requestedRef` and
+`resolvedCommit`. A `conflict` entry also carries `conflictReason` and `conflictPath`.
+
+`scan --json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "artifacts": [
+    { "id": "skill:review", "kind": "skill", "name": "review", "status": "new", "...": "..." }
+  ]
+}
+```
+
+`artifacts` includes `source-missing` entries: managed artifacts no longer present in the currently scanned source
+repository.
+
+`install --json` reports what happened to each discovered artifact, split into five id-addressable arrays:
+
+```json
+{
+  "schemaVersion": 1,
+  "installed": [],
+  "updated": [],
+  "skipped": [],
+  "refused": [],
+  "pruned": []
+}
+```
+
+- `installed`: artifacts that had never been installed before and now are.
+- `updated`: previously installed artifacts whose source or exposure had drifted, now reinstalled.
+- `skipped`: conflicting artifacts left untouched because `--allow-conflicts` was passed.
+- `refused`: conflicting artifacts that caused the whole run to abort (no `--allow-conflicts`); `installed` and
+  `updated` are empty in that case, and the object carries an `error` string. A non-conflict abort, such as an
+  unmatched `--only` selector, reports the same empty arrays and `error` string with `refused` left empty, since no
+  discovered artifact is implicated.
+- `pruned`: `source-missing` artifacts removed because `--prune` was passed; always empty without that flag.
+
+`list --json` reports the currently managed entries without re-scanning the source repository, so `status` reflects
+whether the base-store copy still matches what was installed and whether its Claude exposure symlink is intact, not
+whether the upstream source has since changed:
+
+```json
+{
+  "schemaVersion": 1,
+  "artifacts": [
+    { "id": "skill:review", "kind": "skill", "name": "review", "status": "installed-same", "...": "..." }
+  ]
+}
+```
+
 ## Typical Workflow
 
 1. Change into a repository that contains `skills/`, `prompts/`, or `commands/`.
@@ -249,6 +360,51 @@ agent-installer list --list-length 12
 4. Keep selected items installed, update changed ones, or remove managed items that should no longer remain installed.
 
 For remote HTTPS Git repositories, the CLI uses the installed `git` command and the user's existing HTTPS credential helpers. Remote checkouts are temporary and are removed after the command completes.
+
+## Build-Time Installation
+
+`agent-installer` can run as a build step of a container image, installing a reviewed skill bundle so it is already
+present when the image starts. Every managed path derives from `HOME` (see `resolveTargetPaths` in
+[src/paths.ts](src/paths.ts)), so the supported way to do this is to set `HOME` to the runtime user's home directory
+for the install step:
+
+```dockerfile
+FROM node:20-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+RUN useradd --create-home --home-dir /home/agent agent
+RUN npm install -g github:lbacik/agent-installer
+
+# Install as the runtime user's HOME so base-store paths and exposure symlinks
+# are correct for the user who will actually run the agent.
+RUN HOME=/home/agent agent-installer install https://github.com/org/agents.git --ref main --all \
+    && chown -R agent:agent /home/agent/.agents /home/agent/.claude
+
+USER agent
+ENV HOME=/home/agent
+```
+
+**The installed tree cannot be relocated after the fact.** Claude exposure symlinks are created with an absolute
+target pointing at the base-store path under the `HOME` used during install. Installing into a staging directory and
+then copying or moving the result into the final image layer produces symlinks that still point at the staging path,
+silently breaking exposure at runtime. Always install directly under the final runtime `HOME`; if a tree must move,
+reinstall after the move instead of relocating it. This constraint, and the rejection of a `--target-root` flag as an
+alternative, is recorded in
+[docs/adr/0003-home-redirection-for-build-time-install.md](docs/adr/0003-home-redirection-for-build-time-install.md).
+
+Prerequisites for a remote install during a build:
+
+- Node satisfying this package's `engines.node` requirement (`>=20`)
+- `git`
+- network access to the source repository
+- any HTTPS credentials the source repository needs (the installer uses the system `git` command and its existing
+  credential helpers; see [Typical Workflow](#typical-workflow))
+
+If the build step runs as a different user than the runtime user (for example, building as `root` and running as an
+unprivileged user), ensure the runtime user can read the installed tree, as in the `chown` step above.
+
+The installer is a build-time tool only. Once the bundle is baked into the image, it is not required at run time and
+does not need to ship in the runtime layer.
 
 ## Development
 

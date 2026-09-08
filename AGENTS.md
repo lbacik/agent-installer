@@ -81,6 +81,21 @@ Implemented commands:
   - aborts with a non-zero exit and installs nothing if the reconciled set includes a `conflict`, naming every
     conflicting id and its target path
   - `--allow-conflicts` installs the eligible artifacts anyway and reports the skipped conflicting ids on stderr
+- `agent-installer install [path] --only <artifact-id>` (repeatable)
+  - non-interactive install or update of an exact subset, using the same `skill:<name>` / `prompt:<name>` id
+    vocabulary as `uninstall` and `list`
+  - mutually exclusive with `--all`; exactly one of them is required
+  - every selector must match a discovered artifact, or the run aborts with a non-zero exit, names the unmatched
+    selectors, and installs nothing
+  - applied to the reconciled set, so conflict handling (including `--allow-conflicts`) behaves as it does under
+    `--all`; unselected artifacts are left untouched
+- `agent-installer install [path] --all --prune` (or `--only ... --prune`)
+  - `--prune` deletes managed files: it removes the base-store copy, the Claude exposure symlink, and the state
+    entry for every artifact reconciled as `source-missing` for the scanned source
+  - opt-in and off by default; combines with `--only`, pruning only what the source no longer offers while leaving
+    merely-unselected artifacts installed
+  - scoped to the scanned source identity, so artifacts owned by a different source are never pruned, and advancing
+    `--ref` on a remote source does not prune previously installed artifacts, since they reconcile as updates
 - `agent-installer uninstall <ids...>`
   - removes managed artifacts by id, for example `skill:review`
 - `agent-installer list`
