@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { Document, isMap, isScalar, parse as parseYaml, parseDocument } from "yaml";
+import { SourceConfigurationError } from "./errors.js";
 import { toSystemPath } from "./paths.js";
 import { OverlayFile } from "./types.js";
 
@@ -49,15 +50,12 @@ function firstLine(message: string): string {
   return message.split("\n", 1)[0] ?? message;
 }
 
-class SourceConfigurationError extends Error {
-  constructor(skillSourcePath: string, metadataPath: string, problem: string) {
-    super(
-      `Cannot translate "${CLAUDE_DISABLE_KEY}: true" for skill "${path.basename(skillSourcePath)}": ` +
-        `its authored Codex metadata "${metadataPath}" ${problem}. ` +
-        `Fix that file in the source repository, or remove "${CLAUDE_DISABLE_KEY}: true" from ${SKILL_ENTRYPOINT}.`
-    );
-    this.name = "SourceConfigurationError";
-  }
+function sourceConfigurationErrorMessage(skillSourcePath: string, metadataPath: string, problem: string): string {
+  return (
+    `Cannot translate "${CLAUDE_DISABLE_KEY}: true" for skill "${path.basename(skillSourcePath)}": ` +
+    `its authored Codex metadata "${metadataPath}" ${problem}. ` +
+    `Fix that file in the source repository, or remove "${CLAUDE_DISABLE_KEY}: true" from ${SKILL_ENTRYPOINT}.`
+  );
 }
 
 /**
@@ -68,7 +66,7 @@ class SourceConfigurationError extends Error {
 function parseAuthoredMetadata(skillSourcePath: string, metadataPath: string, content: string): Document {
   const document = parseDocument(content);
   const reject = (problem: string): never => {
-    throw new SourceConfigurationError(skillSourcePath, metadataPath, problem);
+    throw new SourceConfigurationError(sourceConfigurationErrorMessage(skillSourcePath, metadataPath, problem));
   };
 
   if (document.errors.length > 0) {

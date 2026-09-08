@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { hashArtifact } from "../src/hash.js";
 import { collectArtifactStates, installAllFromSource, installArtifacts, removeArtifacts } from "../src/install.js";
 import { resolveTargetPaths } from "../src/paths.js";
 import { scanSourceRepository } from "../src/source.js";
@@ -715,5 +716,83 @@ describe("authored codex metadata", () => {
     });
     expect(await statusOf(repo, home, "skill:permissive")).toBe("installed-same");
     expect(await statusOf(repo, home, "skill:plain")).toBe("installed-same");
+  });
+});
+
+describe("content hashing", () => {
+  async function writeExecutableScript(skillPath: string, relativePath: string, mode = 0o755): Promise<string> {
+    const scriptPath = path.join(skillPath, relativePath);
+    await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+    await fs.writeFile(scriptPath, "#!/bin/sh\necho hi\n", "utf8");
+    await fs.chmod(scriptPath, mode);
+    return scriptPath;
+  }
+
+  it("preserves the executable bit when installing a skill script", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const skillPath = await writeSkill(repo, "runnable", "# Runnable\n");
+    await writeExecutableScript(skillPath, "scripts/run.sh");
+
+    await installAll(repo, home);
+
+    const paths = resolveTargetPaths(home);
+    const installedMode = (await fs.stat(path.join(paths.agentsSkillsDir, "runnable", "scripts", "run.sh"))).mode & 0o777;
+    expect(installedMode).toBe(0o755);
+  });
+
+  it("reconciles installed-different when the installed script loses its executable bit, and reinstalling restores it", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const skillPath = await writeSkill(repo, "runnable", "# Runnable\n");
+    await writeExecutableScript(skillPath, "scripts/run.sh");
+    await installAll(repo, home);
+
+    const paths = resolveTargetPaths(home);
+    const installedScriptPath = path.join(paths.agentsSkillsDir, "runnable", "scripts", "run.sh");
+    await fs.chmod(installedScriptPath, 0o644);
+
+    expect(await statusOf(repo, home, "skill:runnable")).toBe("installed-different");
+
+    await installAll(repo, home);
+
+    expect((await fs.stat(installedScriptPath)).mode & 0o777).toBe(0o755);
+    expect(await statusOf(repo, home, "skill:runnable")).toBe("installed-same");
+  });
+
+  it("aborts scan and install with an error naming the relative path when a skill directory contains a symlink", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const skillPath = await writeSkill(repo, "linked", "# Linked\n");
+    await fs.writeFile(path.join(skillPath, "target.txt"), "content\n", "utf8");
+    await fs.symlink(path.join(skillPath, "target.txt"), path.join(skillPath, "shortcut.txt"));
+
+    const artifacts = await scanSourceRepository(repo);
+    await expect(collectArtifactStates(artifacts, home)).rejects.toThrow(/shortcut\.txt/);
+    await expect(installAll(repo, home)).rejects.toThrow(/shortcut\.txt/);
+
+    const paths = resolveTargetPaths(home);
+    await expect(fs.access(path.join(paths.agentsSkillsDir, "linked"))).rejects.toMatchObject({ code: "ENOENT" });
+    // The repo also contains the unrelated "review" skill from makeRepo(); the abort must
+    // stop the whole run before any managed target is created, not just the offending one.
+    await expect(fs.access(path.join(paths.agentsSkillsDir, "review"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("hashes the executable bit independently of the process umask", async () => {
+    const repo = await makeRepo();
+    const skillPath = await writeSkill(repo, "runnable", "# Runnable\n");
+    await writeExecutableScript(skillPath, "scripts/run.sh");
+    const artifacts = await scanSourceRepository(repo);
+    const runnable = artifacts.find((artifact) => artifact.name === "runnable")!;
+
+    const originalUmask = process.umask(0o077);
+    try {
+      const withRestrictiveUmask = await hashArtifact(runnable.kind, runnable.sourcePath);
+      process.umask(0o022);
+      const withPermissiveUmask = await hashArtifact(runnable.kind, runnable.sourcePath);
+      expect(withRestrictiveUmask).toBe(withPermissiveUmask);
+    } finally {
+      process.umask(originalUmask);
+    }
   });
 });
