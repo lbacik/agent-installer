@@ -361,6 +361,51 @@ whether the upstream source has since changed:
 
 For remote HTTPS Git repositories, the CLI uses the installed `git` command and the user's existing HTTPS credential helpers. Remote checkouts are temporary and are removed after the command completes.
 
+## Build-Time Installation
+
+`agent-installer` can run as a build step of a container image, installing a reviewed skill bundle so it is already
+present when the image starts. Every managed path derives from `HOME` (see `resolveTargetPaths` in
+[src/paths.ts](src/paths.ts)), so the supported way to do this is to set `HOME` to the runtime user's home directory
+for the install step:
+
+```dockerfile
+FROM node:20-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+RUN useradd --create-home --home-dir /home/agent agent
+RUN npm install -g github:lbacik/agent-installer
+
+# Install as the runtime user's HOME so base-store paths and exposure symlinks
+# are correct for the user who will actually run the agent.
+RUN HOME=/home/agent agent-installer install https://github.com/org/agents.git --ref main --all \
+    && chown -R agent:agent /home/agent/.agents /home/agent/.claude
+
+USER agent
+ENV HOME=/home/agent
+```
+
+**The installed tree cannot be relocated after the fact.** Claude exposure symlinks are created with an absolute
+target pointing at the base-store path under the `HOME` used during install. Installing into a staging directory and
+then copying or moving the result into the final image layer produces symlinks that still point at the staging path,
+silently breaking exposure at runtime. Always install directly under the final runtime `HOME`; if a tree must move,
+reinstall after the move instead of relocating it. This constraint, and the rejection of a `--target-root` flag as an
+alternative, is recorded in
+[docs/adr/0003-home-redirection-for-build-time-install.md](docs/adr/0003-home-redirection-for-build-time-install.md).
+
+Prerequisites for a remote install during a build:
+
+- Node satisfying this package's `engines.node` requirement (`>=20`)
+- `git`
+- network access to the source repository
+- any HTTPS credentials the source repository needs (the installer uses the system `git` command and its existing
+  credential helpers; see [Typical Workflow](#typical-workflow))
+
+If the build step runs as a different user than the runtime user (for example, building as `root` and running as an
+unprivileged user), ensure the runtime user can read the installed tree, as in the `chown` step above.
+
+The installer is a build-time tool only. Once the bundle is baked into the image, it is not required at run time and
+does not need to ship in the runtime layer.
+
 ## Development
 
 Useful commands:
