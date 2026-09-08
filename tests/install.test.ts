@@ -68,6 +68,22 @@ async function statusOf(repo: string, home: string, id: string): Promise<string 
   return states.find((state) => state.id === id)?.status;
 }
 
+function makeCheckoutGitRunner(resolvedCommit: string, populate: (checkout: string) => Promise<void>): GitRunner {
+  return async (args) => {
+    if (args[0] === "clone") {
+      const checkout = args[4] ?? "";
+      await populate(checkout);
+      return "";
+    }
+
+    if (args[0] === "rev-parse") {
+      return `${resolvedCommit}\n`;
+    }
+
+    return "";
+  };
+}
+
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
@@ -155,7 +171,7 @@ describe("install lifecycle", () => {
   it("scopes remote source-missing entries by remote source identity", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-home-");
-    const sourceIdentity = "git+https://github.com/org/repo.git#ref=v1";
+    const sourceIdentity = "git+https://github.com/org/repo-v1.git";
 
     const artifacts = (await scanSourceRepository(repo)).map((artifact) => ({ ...artifact, sourceRoot: sourceIdentity }));
     const initial = await collectArtifactStates(artifacts, home, sourceIdentity);
@@ -167,14 +183,14 @@ describe("install lifecycle", () => {
 
     expect(next.removed.map((entry) => entry.id)).toEqual(["prompt:commit-message"]);
 
-    const otherSource = await collectArtifactStates([], home, "git+https://github.com/org/repo.git#ref=v2");
+    const otherSource = await collectArtifactStates([], home, "git+https://github.com/org/repo-v2.git");
     expect(otherSource.removed).toEqual([]);
   });
 
   it("stores sanitized remote identities when installing remote artifacts", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-home-");
-    const sourceIdentity = "git+https://github.com/org/repo.git#ref=main";
+    const sourceIdentity = "git+https://github.com/org/repo.git";
 
     const artifacts = (await scanSourceRepository(repo)).map((artifact) => ({ ...artifact, sourceRoot: sourceIdentity }));
     const { states } = await collectArtifactStates(artifacts, home, sourceIdentity);
@@ -186,17 +202,13 @@ describe("install lifecycle", () => {
 
   it("installs remote artifacts through a temporary Git checkout", async () => {
     const home = await makeTempDir("agent-installer-home-");
-    const git: GitRunner = async (args) => {
-      if (args[0] !== "clone") {
-        return;
-      }
-
-      const checkout = args[4] ?? "";
+    const resolvedCommit = "a".repeat(40);
+    const git = makeCheckoutGitRunner(resolvedCommit, async (checkout) => {
       await fs.mkdir(path.join(checkout, "skills", "review"), { recursive: true });
       await fs.writeFile(path.join(checkout, "skills", "review", "SKILL.md"), "# Review\n", "utf8");
       await fs.mkdir(path.join(checkout, "prompts"), { recursive: true });
       await fs.writeFile(path.join(checkout, "prompts", "commit-message.md"), "commit prompt\n", "utf8");
-    };
+    });
 
     const { states } = await installAllFromSource(
       "https://token:secret@github.com/org/repo.git?access_token=abc",
@@ -209,10 +221,58 @@ describe("install lifecycle", () => {
     const state = await loadState(paths);
     expect(states.map((entry) => entry.id)).toEqual(["prompt:commit-message", "skill:review"]);
     expect(state.entries.map((entry) => entry.sourceRoot)).toEqual([
-      "git+https://github.com/org/repo.git#ref=main",
-      "git+https://github.com/org/repo.git#ref=main"
+      "git+https://github.com/org/repo.git",
+      "git+https://github.com/org/repo.git"
     ]);
+    expect(state.entries.map((entry) => entry.requestedRef)).toEqual(["main", "main"]);
+    expect(state.entries.map((entry) => entry.resolvedCommit)).toEqual([resolvedCommit, resolvedCommit]);
     expect(await fs.readFile(path.join(paths.agentsSkillsDir, "review", "SKILL.md"), "utf8")).toContain("# Review");
+  });
+
+  it("records resolved commit provenance without a requested ref", async () => {
+    const home = await makeTempDir("agent-installer-home-");
+    const resolvedCommit = "b".repeat(40);
+    const git = makeCheckoutGitRunner(resolvedCommit, async (checkout) => {
+      await fs.mkdir(path.join(checkout, "prompts"), { recursive: true });
+      await fs.writeFile(path.join(checkout, "prompts", "commit-message.md"), "commit prompt\n", "utf8");
+    });
+
+    await installAllFromSource("https://github.com/org/repo.git", home, undefined, { git });
+
+    const state = await loadState(resolveTargetPaths(home));
+    expect(state.entries[0]?.requestedRef).toBeUndefined();
+    expect(state.entries[0]?.resolvedCommit).toBe(resolvedCommit);
+  });
+
+  it("advances a pinned ref by reconciling as installed-different rather than conflict", async () => {
+    const home = await makeTempDir("agent-installer-home-");
+    const commitA = "a".repeat(40);
+    const gitA = makeCheckoutGitRunner(commitA, async (checkout) => {
+      await fs.mkdir(path.join(checkout, "prompts"), { recursive: true });
+      await fs.writeFile(path.join(checkout, "prompts", "commit-message.md"), "commit prompt v1\n", "utf8");
+    });
+
+    const first = await installAllFromSource("https://github.com/org/repo.git", home, undefined, { ref: "aaa", git: gitA });
+    expect(first.conflicts).toEqual([]);
+    expect(first.states.map((state) => state.id)).toEqual(["prompt:commit-message"]);
+
+    const commitB = "b".repeat(40);
+    const gitB = makeCheckoutGitRunner(commitB, async (checkout) => {
+      await fs.mkdir(path.join(checkout, "prompts"), { recursive: true });
+      await fs.writeFile(path.join(checkout, "prompts", "commit-message.md"), "commit prompt v2\n", "utf8");
+    });
+
+    const second = await installAllFromSource("https://github.com/org/repo.git", home, undefined, { ref: "bbb", git: gitB });
+    expect(second.conflicts).toEqual([]);
+    expect(second.states.find((state) => state.id === "prompt:commit-message")?.status).toBe("installed-different");
+
+    const state = await loadState(resolveTargetPaths(home));
+    const entry = state.entries.find((candidate) => candidate.id === "prompt:commit-message");
+    expect(entry?.requestedRef).toBe("bbb");
+    expect(entry?.resolvedCommit).toBe(commitB);
+
+    const paths = resolveTargetPaths(home);
+    expect(await fs.readFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "utf8")).toBe("commit prompt v2\n");
   });
 
   it("removes only managed artifacts", async () => {
@@ -311,6 +371,196 @@ describe("install --all conflict handling", () => {
     await fs.symlink(foreignTarget, path.join(paths.claudeSkillsDir, "review"));
 
     await expect(installAllFromSource(repo, home)).rejects.toThrow(path.join(paths.claudeSkillsDir, "review"));
+  });
+});
+
+describe("install --only selection", () => {
+  it("installs exactly the selected artifacts and leaves others uninstalled", async () => {
+    const repo = await makeRepo();
+    await writeSkill(repo, "extra", "# Extra\n");
+    const home = await makeTempDir("agent-installer-home-");
+
+    const { installed, conflicts } = await installAllFromSource(repo, home, undefined, undefined, {
+      only: ["skill:review", "prompt:commit-message"]
+    });
+
+    expect(conflicts).toEqual([]);
+    expect(installed.map((entry) => entry.id).sort()).toEqual(["prompt:commit-message", "skill:review"]);
+
+    const state = await loadState(resolveTargetPaths(home));
+    expect(state.entries.map((entry) => entry.id).sort()).toEqual(["prompt:commit-message", "skill:review"]);
+    expect(await statusOf(repo, home, "skill:extra")).toBe("new");
+  });
+
+  it("installs a repeated selector once", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+
+    const { installed } = await installAllFromSource(repo, home, undefined, undefined, {
+      only: ["skill:review", "skill:review"]
+    });
+
+    expect(installed.map((entry) => entry.id)).toEqual(["skill:review"]);
+  });
+
+  it("exits without installing anything when a selector matches no discovered artifact", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+
+    await expect(
+      installAllFromSource(repo, home, undefined, undefined, { only: ["skill:review", "skill:missing"] })
+    ).rejects.toThrow(/skill:missing/);
+
+    const state = await loadState(resolveTargetPaths(home));
+    expect(state.entries).toEqual([]);
+  });
+
+  it("aborts on a selected conflicting artifact under default strict behaviour", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    await fs.mkdir(paths.agentsPromptsDir, { recursive: true });
+    await fs.writeFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "user-owned\n", "utf8");
+
+    await expect(
+      installAllFromSource(repo, home, undefined, undefined, { only: ["skill:review", "prompt:commit-message"] })
+    ).rejects.toThrow(/prompt:commit-message/);
+
+    const state = await loadState(paths);
+    expect(state.entries).toEqual([]);
+  });
+
+  it("skips a selected conflicting artifact and installs the rest with allowConflicts", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    await fs.mkdir(paths.agentsPromptsDir, { recursive: true });
+    await fs.writeFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "user-owned\n", "utf8");
+
+    const { installed, conflicts } = await installAllFromSource(repo, home, undefined, undefined, {
+      only: ["skill:review", "prompt:commit-message"],
+      allowConflicts: true
+    });
+
+    expect(installed.map((entry) => entry.id)).toEqual(["skill:review"]);
+    expect(conflicts.map((state) => state.id)).toEqual(["prompt:commit-message"]);
+  });
+});
+
+describe("install --prune", () => {
+  it("leaves source-missing artifacts installed when --prune is not passed", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    await installAllFromSource(repo, home);
+
+    await fs.rm(path.join(repo, "prompts", "commit-message.md"));
+    const { pruned } = await installAllFromSource(repo, home, undefined, undefined, {});
+
+    expect(pruned).toEqual([]);
+    const state = await loadState(paths);
+    expect(state.entries.map((entry) => entry.id)).toContain("prompt:commit-message");
+    expect(await fs.readFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "utf8")).toContain("commit prompt");
+    expect(await fs.readlink(path.join(paths.claudeCommandsDir, "commit-message.md"))).toBe(
+      path.join(paths.agentsPromptsDir, "commit-message.md")
+    );
+  });
+
+  it("removes the base store copy, exposure symlink and state entry for source-missing artifacts with --prune", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    await installAllFromSource(repo, home);
+
+    await fs.rm(path.join(repo, "prompts", "commit-message.md"));
+    const { pruned } = await installAllFromSource(repo, home, undefined, undefined, { prune: true });
+
+    expect(pruned.map((entry) => entry.id)).toEqual(["prompt:commit-message"]);
+
+    const state = await loadState(paths);
+    expect(state.entries.map((entry) => entry.id)).toEqual(["skill:review"]);
+    await expect(fs.access(path.join(paths.agentsPromptsDir, "commit-message.md"))).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+    await expect(fs.access(path.join(paths.claudeCommandsDir, "commit-message.md"))).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+  });
+
+  it("never prunes artifacts owned by a different source identity, even when the scanned source shares their names", async () => {
+    const repoA = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    await installAllFromSource(repoA, home);
+
+    // repoB is a distinct source identity that happens to declare the exact same artifact
+    // names ("review", "commit-message") already owned by repoA. Installing from it reconciles
+    // those names as conflicts (owned by another source), not source-missing, so --prune must
+    // leave repoA's entries untouched.
+    const repoB = await makeRepo();
+    const { pruned } = await installAllFromSource(repoB, home, undefined, undefined, {
+      allowConflicts: true,
+      prune: true
+    });
+
+    expect(pruned).toEqual([]);
+
+    const paths = resolveTargetPaths(home);
+    const state = await loadState(paths);
+    const ownerOfRepoA = await fs.realpath(repoA);
+    expect(state.entries.map((entry) => entry.id).sort()).toEqual(["prompt:commit-message", "skill:review"]);
+    expect(state.entries.every((entry) => entry.sourceRoot === ownerOfRepoA)).toBe(true);
+    expect(await fs.readFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "utf8")).toContain("commit prompt");
+  });
+
+  it("does not prune previously installed artifacts when --ref advances", async () => {
+    const home = await makeTempDir("agent-installer-home-");
+    const commitA = "a".repeat(40);
+    const gitA = makeCheckoutGitRunner(commitA, async (checkout) => {
+      await fs.mkdir(path.join(checkout, "prompts"), { recursive: true });
+      await fs.writeFile(path.join(checkout, "prompts", "commit-message.md"), "commit prompt v1\n", "utf8");
+      await fs.mkdir(path.join(checkout, "skills", "review"), { recursive: true });
+      await fs.writeFile(path.join(checkout, "skills", "review", "SKILL.md"), "# Review\n", "utf8");
+    });
+    await installAllFromSource("https://github.com/org/repo.git", home, undefined, { ref: "aaa", git: gitA });
+
+    const commitB = "b".repeat(40);
+    const gitB = makeCheckoutGitRunner(commitB, async (checkout) => {
+      await fs.mkdir(path.join(checkout, "prompts"), { recursive: true });
+      await fs.writeFile(path.join(checkout, "prompts", "commit-message.md"), "commit prompt v2\n", "utf8");
+      await fs.mkdir(path.join(checkout, "skills", "review"), { recursive: true });
+      await fs.writeFile(path.join(checkout, "skills", "review", "SKILL.md"), "# Review\n", "utf8");
+    });
+    const { pruned } = await installAllFromSource("https://github.com/org/repo.git", home, undefined, {
+      ref: "bbb",
+      git: gitB
+    }, { prune: true });
+
+    expect(pruned).toEqual([]);
+    const state = await loadState(resolveTargetPaths(home));
+    expect(state.entries.map((entry) => entry.id).sort()).toEqual(["prompt:commit-message", "skill:review"]);
+  });
+
+  it("prunes only what the scanned source no longer offers, leaving merely-unselected artifacts alone", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    await installAllFromSource(repo, home);
+
+    await writeSkill(repo, "extra", "# Extra\n");
+    await fs.rm(path.join(repo, "prompts", "commit-message.md"));
+    const { pruned, installed } = await installAllFromSource(repo, home, undefined, undefined, {
+      only: ["skill:extra"],
+      prune: true
+    });
+
+    expect(pruned.map((entry) => entry.id)).toEqual(["prompt:commit-message"]);
+    expect(installed.map((entry) => entry.id)).toEqual(["skill:extra"]);
+
+    const paths = resolveTargetPaths(home);
+    const state = await loadState(paths);
+    expect(state.entries.map((entry) => entry.id).sort()).toEqual(["skill:extra", "skill:review"]);
+    await expect(fs.access(path.join(paths.agentsPromptsDir, "commit-message.md"))).rejects.toMatchObject({
+      code: "ENOENT"
+    });
   });
 });
 
@@ -525,7 +775,7 @@ describe("codex invocation policy translation", () => {
     const home = await makeTempDir("agent-installer-home-");
     const git: GitRunner = async (args) => {
       if (args[0] !== "clone") {
-        return;
+        return "";
       }
 
       const checkout = args[4] ?? "";
@@ -535,6 +785,7 @@ describe("codex invocation policy translation", () => {
         skillWithFrontmatter("disable-model-invocation: true"),
         "utf8"
       );
+      return "";
     };
 
     const { states } = await installAllFromSource("https://github.com/org/repo.git", home, undefined, { ref: "main", git });

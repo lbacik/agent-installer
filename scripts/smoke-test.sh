@@ -47,6 +47,18 @@ mkdir -p "$HOME"
 
 "$cli" --help > /dev/null
 
+expected_version="$(node -p "require('$repo_root/package.json').version")"
+version_output="$("$cli" --version)"
+if [ "$version_output" != "$expected_version" ]; then
+  echo "smoke: --version printed '$version_output', expected '$expected_version'" >&2
+  exit 1
+fi
+short_version_output="$("$cli" -v)"
+if [ "$short_version_output" != "$expected_version" ]; then
+  echo "smoke: -v printed '$short_version_output', expected '$expected_version'" >&2
+  exit 1
+fi
+
 output="$("$cli" scan "$fixture")"
 echo "$output"
 

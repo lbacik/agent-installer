@@ -146,7 +146,7 @@ describe("promptForSelections", () => {
       expect.objectContaining({
         theme: expect.objectContaining({
           style: expect.objectContaining({
-            disabledChoice: expect.any(Function)
+            disabled: expect.any(Function)
           })
         }),
         choices: expect.arrayContaining([
@@ -161,8 +161,8 @@ describe("promptForSelections", () => {
       expect.any(Object)
     );
 
-    const checkboxConfig = checkboxMock.mock.calls[0]?.[0] as { theme?: { style?: { disabledChoice?: (text: string) => string } } };
-    expect(checkboxConfig.theme?.style?.disabledChoice?.("● prompt:commit-message [conflict] reason")).toContain(
+    const checkboxConfig = checkboxMock.mock.calls[0]?.[0] as { theme?: { style?: { disabled?: (text: string) => string } } };
+    expect(checkboxConfig.theme?.style?.disabled?.("● prompt:commit-message [conflict] reason")).toContain(
       " ● prompt:commit-message [conflict] reason"
     );
   });

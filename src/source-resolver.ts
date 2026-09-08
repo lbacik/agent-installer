@@ -9,19 +9,24 @@ const execFileAsync = promisify(execFile);
 export interface ResolvedSource {
   scanRoot: string;
   sourceIdentity: string;
+  /** The `--ref` value the caller requested, when the source is a remote Git repository. */
+  requestedRef?: string | undefined;
+  /** The full 40-character commit SHA actually checked out, when the source is a remote Git repository. */
+  resolvedCommit?: string;
   cleanup: () => Promise<void>;
 }
 
-export type GitRunner = (args: string[], cwd?: string) => Promise<void>;
+export type GitRunner = (args: string[], cwd?: string) => Promise<string>;
 
 export interface ResolveSourceOptions {
   ref?: string;
   git?: GitRunner;
 }
 
-async function defaultGitRunner(args: string[], cwd?: string): Promise<void> {
+async function defaultGitRunner(args: string[], cwd?: string): Promise<string> {
   try {
-    await execFileAsync("git", args, cwd === undefined ? {} : { cwd });
+    const { stdout } = await execFileAsync("git", args, cwd === undefined ? {} : { cwd });
+    return stdout;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`git ${args.join(" ")} failed: ${message}`);
@@ -37,15 +42,14 @@ export function isHttpsGitSource(input: string): boolean {
   }
 }
 
-export function sanitizeRemoteSourceIdentity(input: string, ref?: string): string {
+export function sanitizeRemoteSourceIdentity(input: string): string {
   const url = new URL(input);
   url.username = "";
   url.password = "";
   url.search = "";
   url.hash = "";
 
-  const base = `git+${url.toString()}`;
-  return ref === undefined ? base : `${base}#ref=${encodeURIComponent(ref)}`;
+  return `git+${url.toString()}`;
 }
 
 async function removeTempDir(tempDir: string): Promise<void> {
@@ -79,9 +83,13 @@ export async function resolveSourceInput(inputPath?: string, options: ResolveSou
       await git(["checkout", "--detach", "FETCH_HEAD"], scanRoot);
     }
 
+    const resolvedCommit = (await git(["rev-parse", "HEAD"], scanRoot)).trim();
+
     return {
       scanRoot,
-      sourceIdentity: sanitizeRemoteSourceIdentity(input, options.ref),
+      sourceIdentity: sanitizeRemoteSourceIdentity(input),
+      requestedRef: options.ref,
+      resolvedCommit,
       cleanup: async () => {
         await removeTempDir(tempDir);
       }

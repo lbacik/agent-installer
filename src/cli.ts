@@ -1,9 +1,19 @@
 #!/usr/bin/env node
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
-import { installAllFromSource, installArtifacts, removeArtifacts } from "./install.js";
+import { InstallConflictError, installAllFromSource, installArtifacts, removeArtifacts } from "./install.js";
 import { formatArtifactLine, formatConflictLine, formatOperationLine, formatRemovedLine } from "./format.js";
 import { promptForManagedArtifactRemovals, promptForSelections } from "./interactive.js";
+import {
+  buildArtifactsErrorJson,
+  buildInstallErrorJson,
+  buildInstallSuccessJson,
+  buildListJson,
+  buildScanJson
+} from "./json-report.js";
 import { resolveTargetPaths } from "./paths.js";
 import { loadState } from "./state.js";
 import { withResolvedArtifactStates } from "./source-workflow.js";
@@ -23,6 +33,14 @@ function printLines(lines: string[]): void {
   for (const line of lines) {
     console.log(line);
   }
+}
+
+function printJson(value: unknown): void {
+  console.log(JSON.stringify(value, null, 2));
+}
+
+function addJsonOption(command: Command, description: string): Command {
+  return command.option("--json", description);
 }
 
 function toStateMap(states: ArtifactState[]): Map<string, ArtifactState> {
@@ -52,6 +70,17 @@ function addSkillMaxDepthOption(command: Command): Command {
 
 function addRefOption(command: Command): Command {
   return command.option("--ref <ref>", "Git branch, tag, or commit to scan when the source is an HTTPS Git repository");
+}
+
+function collectOnly(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+function readPackageVersion(): string {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  const packageJsonPath = path.join(moduleDir, "..", "package.json");
+  const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string };
+  return packageJson.version;
 }
 
 async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOptions, listLength?: number, ref?: string): Promise<void> {
@@ -94,6 +123,7 @@ function createProgram(): Command {
   addRefOption(addSkillMaxDepthOption(program))
     .name("agent-installer")
     .description("Install Codex skills and Claude Code skills and commands from a local or HTTPS Git repository.")
+    .version(readPackageVersion(), "-v, --version", "Output the installed CLI version")
     .argument("[path]", "Source repository to scan", process.cwd())
     .option(
       "--list-length <count>",
@@ -104,46 +134,115 @@ function createProgram(): Command {
       await runInteractive(inputPath, scanOptionsFromCommand(options), options.listLength, options.ref);
     });
 
-  addRefOption(addSkillMaxDepthOption(program.command("scan")))
+  addJsonOption(
+    addRefOption(addSkillMaxDepthOption(program.command("scan"))),
+    "Emit a machine-readable JSON report on stdout instead of human-readable output"
+  )
     .argument("[path]", "Source repository to scan", process.cwd())
-    .action(async (inputPath, options: ScanCommandOptions) => {
-      await withResolvedArtifactStates(
-        inputPath,
-        undefined,
-        scanOptionsFromCommand(options),
-        options.ref === undefined ? undefined : { ref: options.ref },
-        async ({ states, removed }) => {
-          printLines(states.map(formatArtifactLine));
-          if (removed.length > 0) {
-            printLines(removed.map(formatRemovedLine));
+    .action(async (inputPath, options: ScanCommandOptions & { json?: boolean }) => {
+      const json = options.json === true;
+      try {
+        await withResolvedArtifactStates(
+          inputPath,
+          undefined,
+          scanOptionsFromCommand(options),
+          options.ref === undefined ? undefined : { ref: options.ref },
+          async ({ states, removed }) => {
+            if (json) {
+              printJson(buildScanJson(states, removed));
+              return;
+            }
+
+            printLines(states.map(formatArtifactLine));
+            if (removed.length > 0) {
+              printLines(removed.map(formatRemovedLine));
+            }
           }
+        );
+      } catch (error) {
+        if (!json) {
+          throw error;
         }
-      );
+
+        printJson(buildArtifactsErrorJson(error));
+        process.exitCode = 1;
+      }
     });
 
-  addRefOption(addSkillMaxDepthOption(program.command("install")))
-    .description("Install or update all discovered artifacts from the source repository.")
+  addJsonOption(
+    addRefOption(addSkillMaxDepthOption(program.command("install"))),
+    "Emit a machine-readable JSON report on stdout instead of human-readable output"
+  )
+    .description("Install or update discovered artifacts from the source repository (--all or --only).")
     .argument("[path]", "Source repository to scan", process.cwd())
     .option("--all", "Install all discovered artifacts")
+    .option("--only <artifact-id>", "Install only this artifact id, for example skill:review (repeatable)", collectOnly, [])
     .option("--allow-conflicts", "Install eligible artifacts and skip conflicting ones instead of aborting")
-    .action(async (inputPath, options: ScanCommandOptions & { all?: boolean; allowConflicts?: boolean }) => {
-      if (!options.all) {
-        throw new Error("Use --all for non-interactive installation.");
-      }
-
-      const { installed, conflicts } = await installAllFromSource(
+    .option(
+      "--prune",
+      "Remove managed artifacts no longer present in the scanned source (deletes their base-store copy, exposure symlink, and state entry)"
+    )
+    .action(
+      async (
         inputPath,
-        undefined,
-        scanOptionsFromCommand(options),
-        options.ref === undefined ? undefined : { ref: options.ref },
-        { allowConflicts: options.allowConflicts === true }
-      );
+        options: ScanCommandOptions & {
+          all?: boolean;
+          only: string[];
+          allowConflicts?: boolean;
+          prune?: boolean;
+          json?: boolean;
+        }
+      ) => {
+        const json = options.json === true;
+        try {
+          const only = options.only.length > 0 ? options.only : undefined;
+          if (options.all && only !== undefined) {
+            throw new Error("--all and --only are mutually exclusive.");
+          }
 
-      console.log(`installed/updated ${installed.length}`);
-      for (const state of conflicts) {
-        console.error(`skipped ${formatConflictLine(state)}`);
+          if (!options.all && only === undefined) {
+            throw new Error("Use --all for non-interactive installation.");
+          }
+
+          const { states, installed, conflicts, pruned } = await installAllFromSource(
+            inputPath,
+            undefined,
+            scanOptionsFromCommand(options),
+            options.ref === undefined ? undefined : { ref: options.ref },
+            {
+              allowConflicts: options.allowConflicts === true,
+              prune: options.prune === true,
+              ...(only === undefined ? {} : { only })
+            }
+          );
+
+          if (json) {
+            printJson(await buildInstallSuccessJson(states, installed, conflicts, pruned));
+            return;
+          }
+
+          console.log(`installed/updated ${installed.length}`);
+          for (const state of conflicts) {
+            console.error(`skipped ${formatConflictLine(state)}`);
+          }
+
+          if (pruned.length > 0) {
+            console.log(`pruned ${pruned.length}`);
+            for (const entry of pruned) {
+              console.log(formatOperationLine("removed", entry.id));
+            }
+          }
+        } catch (error) {
+          if (!json) {
+            throw error;
+          }
+
+          const refused = error instanceof InstallConflictError ? error.conflicts : [];
+          printJson(buildInstallErrorJson(error, refused));
+          process.exitCode = 1;
+        }
       }
-    });
+    );
 
   program
     .command("uninstall")
@@ -154,37 +253,55 @@ function createProgram(): Command {
       console.log(`removed ${removed.length}`);
     });
 
-  program
-    .command("list")
+  addJsonOption(
+    program.command("list"),
+    "Emit a machine-readable JSON report of managed entries on stdout, non-interactively"
+  )
     .description("Interactively manage currently installed artifacts from the base store.")
     .option(
       "--list-length <count>",
       "Number of artifacts visible in the interactive selection list",
       (value) => parsePositiveInteger(value, "--list-length")
     )
-    .action(async (options: { listLength?: number }) => {
-      const state = await loadState(resolveTargetPaths());
-      if (state.entries.length === 0) {
-        console.log("No managed artifacts.");
-        return;
-      }
+    .action(async (options: { listLength?: number; json?: boolean }) => {
+      const json = options.json === true;
+      try {
+        const state = await loadState(resolveTargetPaths());
 
-      const selection = await promptForManagedArtifactRemovals(
-        state.entries,
-        {
-          clearPromptOnDone: true,
-          ...(options.listLength === undefined ? {} : { listLength: options.listLength })
+        if (json) {
+          printJson(await buildListJson(state.entries));
+          return;
         }
-      );
-      if (selection.cancelled) {
-        console.log("No changes applied.");
-        return;
-      }
 
-      const removed = await removeArtifacts(selection.removeIds);
-      printLines(removed.map((entry) => formatOperationLine("removed", entry.id)));
-      if (removed.length === 0) {
-        console.log("No changes applied.");
+        if (state.entries.length === 0) {
+          console.log("No managed artifacts.");
+          return;
+        }
+
+        const selection = await promptForManagedArtifactRemovals(
+          state.entries,
+          {
+            clearPromptOnDone: true,
+            ...(options.listLength === undefined ? {} : { listLength: options.listLength })
+          }
+        );
+        if (selection.cancelled) {
+          console.log("No changes applied.");
+          return;
+        }
+
+        const removed = await removeArtifacts(selection.removeIds);
+        printLines(removed.map((entry) => formatOperationLine("removed", entry.id)));
+        if (removed.length === 0) {
+          console.log("No changes applied.");
+        }
+      } catch (error) {
+        if (!json) {
+          throw error;
+        }
+
+        printJson(buildArtifactsErrorJson(error));
+        process.exitCode = 1;
       }
     });
 

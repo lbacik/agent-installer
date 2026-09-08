@@ -25,12 +25,13 @@ describe("withResolvedArtifactStates", () => {
     let checkoutRoot = "";
     const git: GitRunner = async (args) => {
       if (args[0] !== "clone") {
-        return;
+        return "";
       }
 
       checkoutRoot = args[4] ?? "";
       await fs.mkdir(path.join(checkoutRoot, "prompts"), { recursive: true });
       await fs.writeFile(path.join(checkoutRoot, "prompts", "git-diff-stat.md"), "summarize diff stats\n", "utf8");
+      return "";
     };
 
     await withResolvedArtifactStates(

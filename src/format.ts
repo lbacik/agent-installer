@@ -44,12 +44,27 @@ function formatSourcePath(sourceRoot: string, relativeSourcePath: string): strin
   return path.join(sourceRoot, relativeSourcePath);
 }
 
+function formatProvenance(entry: ManagedEntry): string | undefined {
+  const parts: string[] = [];
+  if (entry.requestedRef !== undefined) {
+    parts.push(`ref=${entry.requestedRef}`);
+  }
+
+  if (entry.resolvedCommit !== undefined) {
+    parts.push(`commit=${entry.resolvedCommit.slice(0, 7)}`);
+  }
+
+  return parts.length === 0 ? undefined : `(${parts.join(" ")})`;
+}
+
 export function formatManagedEntryLines(entries: ManagedEntry[]): string[] {
   const idWidth = Math.max(...entries.map((entry) => entry.id.length));
 
-  return entries.map(
-    (entry) => `${entry.id.padEnd(idWidth)}  ${formatSourcePath(entry.sourceRoot, entry.relativeSourcePath)}`
-  );
+  return entries.map((entry) => {
+    const line = `${entry.id.padEnd(idWidth)}  ${formatSourcePath(entry.sourceRoot, entry.relativeSourcePath)}`;
+    const provenance = formatProvenance(entry);
+    return provenance === undefined ? line : `${line}  ${provenance}`;
+  });
 }
 
 export function formatOperationLine(action: "created" | "updated" | "removed", id: string): string {
