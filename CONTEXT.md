@@ -37,8 +37,12 @@ The local directory or remote Git repository scanned for installable artifacts.
 _Avoid_: registry, remote package
 
 **Source Identity**:
-The stable identifier used to scope managed state for a source repository. Local sources use the real local path; remote Git sources use a sanitized URL plus optional ref.
+The stable identifier used to scope managed state for a source repository. Local sources use the real local path; remote Git sources use the sanitized URL alone, without the requested ref, so advancing a pin updates the same managed entry instead of conflicting with it.
 _Avoid_: checkout path, cache key
+
+**Resolved Commit**:
+The full 40-character commit SHA actually checked out for a remote Git source, recorded on the managed entry alongside the requested ref (`requestedRef`) as provenance. It does not scope source identity and does not participate in content hashing.
+_Avoid_: pinned ref, source identity
 
 **Invocation Policy**:
 Whether a tool may select a skill implicitly. Claude Code declares it in `SKILL.md` frontmatter as `disable-model-invocation`; Codex declares it in the skill's `agents/openai.yaml` as `policy.allow_implicit_invocation`.

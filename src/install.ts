@@ -105,7 +105,9 @@ function buildManagedEntry(
     exposurePath: getExposurePath(paths, artifact),
     sourceHash,
     installedHash,
-    installedAt: new Date().toISOString()
+    installedAt: new Date().toISOString(),
+    requestedRef: artifact.requestedRef,
+    resolvedCommit: artifact.resolvedCommit
   };
 }
 
@@ -234,7 +236,7 @@ export async function installArtifacts(states: ArtifactState[], home?: string): 
     installed.push(entry);
   }
 
-  await saveState(paths, { version: 1, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
+  await saveState(paths, { version: 2, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
   return installed;
 }
 
@@ -257,7 +259,7 @@ export async function removeArtifacts(ids: string[], home?: string): Promise<Man
     removed.push(entry);
   }
 
-  await saveState(paths, { version: 1, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
+  await saveState(paths, { version: 2, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
   return removed;
 }
 
@@ -284,7 +286,9 @@ export async function installAllFromSource(
   try {
     const artifacts = (await scanSourceRepository(source.scanRoot, scanOptions)).map((artifact) => ({
       ...artifact,
-      sourceRoot: source.sourceIdentity
+      sourceRoot: source.sourceIdentity,
+      requestedRef: source.requestedRef,
+      resolvedCommit: source.resolvedCommit
     }));
     const { states } = await collectArtifactStates(artifacts, home, source.sourceIdentity);
     const { installable, conflicts } = partitionInstallAllStates(states);

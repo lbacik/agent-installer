@@ -21,7 +21,9 @@ export async function withResolvedArtifactStates<T>(
   try {
     const artifacts = (await scanSourceRepository(source.scanRoot, scanOptions)).map((artifact) => ({
       ...artifact,
-      sourceRoot: source.sourceIdentity
+      sourceRoot: source.sourceIdentity,
+      requestedRef: source.requestedRef,
+      resolvedCommit: source.resolvedCommit
     }));
     const result = await collectArtifactStates(artifacts, home, source.sourceIdentity);
     return await callback({ ...result, sourceIdentity: source.sourceIdentity });

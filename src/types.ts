@@ -13,6 +13,10 @@ export interface DiscoveredArtifact {
   sourceRoot: string;
   sourcePath: string;
   relativeSourcePath: string;
+  /** The `--ref` value the artifact was scanned at, when the source is a remote Git repository. */
+  requestedRef?: string | undefined;
+  /** The full 40-character commit SHA actually checked out, when the source is a remote Git repository. */
+  resolvedCommit?: string | undefined;
 }
 
 export interface ManagedEntry {
@@ -26,6 +30,10 @@ export interface ManagedEntry {
   sourceHash: string;
   installedHash: string;
   installedAt: string;
+  /** The `--ref` value requested at install time, when the source was a remote Git repository. */
+  requestedRef?: string | undefined;
+  /** The full 40-character commit SHA actually installed, when the source was a remote Git repository. */
+  resolvedCommit?: string | undefined;
 }
 
 export interface ArtifactState {

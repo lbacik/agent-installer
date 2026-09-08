@@ -24,10 +24,10 @@ describe("source resolver", () => {
     expect(isHttpsGitSource("/tmp/repo")).toBe(false);
   });
 
-  it("sanitizes remote identities and includes refs", () => {
-    expect(
-      sanitizeRemoteSourceIdentity("https://token:secret@github.com/org/repo.git?access_token=abc#frag", "release/v1")
-    ).toBe("git+https://github.com/org/repo.git#ref=release%2Fv1");
+  it("sanitizes remote identities and drops credentials, query and fragment", () => {
+    expect(sanitizeRemoteSourceIdentity("https://token:secret@github.com/org/repo.git?access_token=abc#frag")).toBe(
+      "git+https://github.com/org/repo.git"
+    );
   });
 
   it("resolves local sources to real paths and rejects refs", async () => {
@@ -41,24 +41,56 @@ describe("source resolver", () => {
 
   it("clones remote sources with the provided ref and cleans up the checkout", async () => {
     const calls: Array<{ args: string[]; cwd?: string }> = [];
+    const resolvedCommit = "c".repeat(40);
     const git: GitRunner = async (args, cwd) => {
       calls.push(cwd === undefined ? { args } : { args, cwd });
       if (args[0] === "clone") {
         await fs.mkdir(args[4] ?? "", { recursive: true });
+        return "";
       }
+
+      if (args[0] === "rev-parse") {
+        return `${resolvedCommit}\n`;
+      }
+
+      return "";
     };
 
     const source = await resolveSourceInput("https://user:token@github.com/org/repo.git", { ref: "v1.2.0", git });
-    expect(source.sourceIdentity).toBe("git+https://github.com/org/repo.git#ref=v1.2.0");
+    expect(source.sourceIdentity).toBe("git+https://github.com/org/repo.git");
+    expect(source.requestedRef).toBe("v1.2.0");
+    expect(source.resolvedCommit).toBe(resolvedCommit);
     expect(calls).toEqual([
       { args: ["clone", "--depth", "1", "https://user:token@github.com/org/repo.git", source.scanRoot] },
       { args: ["fetch", "--depth", "1", "origin", "v1.2.0"], cwd: source.scanRoot },
-      { args: ["checkout", "--detach", "FETCH_HEAD"], cwd: source.scanRoot }
+      { args: ["checkout", "--detach", "FETCH_HEAD"], cwd: source.scanRoot },
+      { args: ["rev-parse", "HEAD"], cwd: source.scanRoot }
     ]);
 
     await expect(fs.access(source.scanRoot)).resolves.toBeUndefined();
     await source.cleanup();
     await expect(fs.access(source.scanRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("resolves the checked-out commit even when no ref is requested", async () => {
+    const resolvedCommit = "d".repeat(40);
+    const git: GitRunner = async (args) => {
+      if (args[0] === "clone") {
+        await fs.mkdir(args[4] ?? "", { recursive: true });
+        return "";
+      }
+
+      if (args[0] === "rev-parse") {
+        return `${resolvedCommit}\n`;
+      }
+
+      return "";
+    };
+
+    const source = await resolveSourceInput("https://github.com/org/repo.git", { git });
+    expect(source.requestedRef).toBeUndefined();
+    expect(source.resolvedCommit).toBe(resolvedCommit);
+    await source.cleanup();
   });
 
   it("removes temporary checkouts when Git fails", async () => {
@@ -67,7 +99,7 @@ describe("source resolver", () => {
       if (args[0] === "clone") {
         scanRoot = args[4] ?? "";
         await fs.mkdir(scanRoot, { recursive: true });
-        return;
+        return "";
       }
 
       throw new Error("missing ref");
