@@ -116,6 +116,35 @@ export interface RemovedArtifactState {
 }
 
 /**
+ * `sync` reconciles one (artifact, target) exposure at a time. `"create"` and `"match"`
+ * mirror install's exposure plan (path missing vs. already an owned symlink); `"move"`
+ * additionally carries the exposure's stale `previousPath` (the target's directory
+ * changed); `"remove-orphan"` means the recorded target no longer configures this
+ * artifact's kind (or was removed entirely); `"conflict"` means the desired path exists
+ * but is not a symlink to the artifact's basePath, exactly as for `install`.
+ */
+export type SyncActionKind = "create" | "match" | "move" | "remove-orphan" | "conflict";
+
+export interface SyncAction {
+  id: string;
+  targetName: string;
+  kind: ExposureKind;
+  action: SyncActionKind;
+  path: string;
+  /** Set only for `"move"`: the stale exposure path being replaced. */
+  previousPath?: string;
+  /** Set only for `"conflict"`. */
+  reason?: string;
+}
+
+/** A `targetName: null` (legacy) exposure encountered on a processed artifact. `sync`
+ * never touches these; they are only ever surfaced as a notice. */
+export interface SyncLegacyNotice {
+  id: string;
+  path: string;
+}
+
+/**
  * A file the installer materializes into the base-store copy of an artifact,
  * either adding one the source repository does not have or replacing one it
  * does. `relativePath` is POSIX-style and relative to the artifact root.

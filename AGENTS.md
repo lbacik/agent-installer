@@ -108,6 +108,25 @@ Implemented commands:
   - offers a "claude" preset prefilled with `~/.claude/skills` / `~/.claude/commands`, or a detected legacy
     exposure directory when one exists
   - refuses to overwrite an existing `config.yaml` unless confirmed or run with `--force`
+- `agent-installer sync [--only <artifact-id>...] [--target <name>...] [--allow-conflicts] [--dry-run]`
+  - reconciles already-managed artifacts' `exposures[]` against the exposures the current `config.yaml` desires,
+    without contacting a source repository or touching base-store content or content hashes
+  - no flags means full convergence across every managed artifact and every configured target; `--only` narrows
+    by artifact id, `--target` narrows by target name (a target name that no longer exists in `config.yaml` but
+    still owns a recorded exposure is accepted, since that is exactly the orphan `sync` is meant to clean up);
+    combinable
+  - per (artifact, target, kind): creates a missing desired exposure, moves one whose target's resolved path
+    changed (removing the stale symlink first), and auto-removes one whose target was removed or narrowed to no
+    longer declare that kind (orphaned, no opt-in flag needed) -- orphan and stale-path removal both revalidate
+    ownership immediately before deleting, exactly like `uninstall`/`prune`, leaving a foreign replacement alone
+    and reporting it instead of dropping the record; for a moved target, a foreign replacement at the stale path
+    also skips creating the new exposure that round, so the pair never ends up with two exposure records for the
+    same target
+  - a legacy exposure (`targetName: null`) is never modified by `sync`, only surfaced as a notice
+  - conflict handling mirrors `install --all`: aborts with zero changes if any touched pair conflicts, naming
+    every conflicting pair, unless `--allow-conflicts` is passed
+  - `--dry-run` always prints the full planned create/move/remove/conflict actions without touching the
+    filesystem or state, even when a conflict would otherwise abort a real run
 
 ## Status Model
 
@@ -129,7 +148,7 @@ Meaning:
 
 Reconciliation has no status for an unusable source. A skill whose Claude frontmatter enables the Codex invocation-policy translation but whose authored `agents/openai.yaml` cannot be parsed aborts the whole run, including `scan`, with a source-configuration error, so no managed artifact is created or changed from an ambiguous configuration.
 
-**Exposure installation:** `install` creates or repairs one exposure symlink per (artifact, target) pair for every `config.yaml` target that declares the artifact's kind (a `skills` key for a skill, a `prompts` key for a prompt). No `config.yaml` still means base-store-only installation, exactly as before. A basePath conflict blocks the whole artifact; an exposure-level conflict blocks only that pair -- with no `--allow-conflicts`, `install --all`/`--only` abort the entire run naming every conflicting (artifact, target) pair and change nothing, and with `--allow-conflicts` the conflicting pairs are skipped and reported while every other exposure and artifact installs normally. Installing one artifact's several targets is best-effort: a later target's failure never rolls back an earlier target's success, and `exposures[]` always reflects exactly what verified on disk after the run. `uninstall` and `prune`'s `source-missing` cleanup revalidate that each recorded exposure is still an owned symlink to the entry's `basePath` immediately before deleting it; a foreign replacement is left alone and its record retained (reported on stderr) instead of being silently dropped, while the rest of the run -- including that same artifact's `basePath` and marker -- proceeds. Remaining work for the "configurable multi-target tool exposure" effort (issue #38): a `sync` command to reconcile exposures when `config.yaml` changes without any artifact content changing, and richer CLI/JSON reporting of per-target detail (the JSON report schema still surfaces only the first owned exposure per artifact).
+**Exposure installation:** `install` creates or repairs one exposure symlink per (artifact, target) pair for every `config.yaml` target that declares the artifact's kind (a `skills` key for a skill, a `prompts` key for a prompt). No `config.yaml` still means base-store-only installation, exactly as before. A basePath conflict blocks the whole artifact; an exposure-level conflict blocks only that pair -- with no `--allow-conflicts`, `install --all`/`--only` abort the entire run naming every conflicting (artifact, target) pair and change nothing, and with `--allow-conflicts` the conflicting pairs are skipped and reported while every other exposure and artifact installs normally. Installing one artifact's several targets is best-effort: a later target's failure never rolls back an earlier target's success, and `exposures[]` always reflects exactly what verified on disk after the run. `uninstall` and `prune`'s `source-missing` cleanup revalidate that each recorded exposure is still an owned symlink to the entry's `basePath` immediately before deleting it; a foreign replacement is left alone and its record retained (reported on stderr) instead of being silently dropped, while the rest of the run -- including that same artifact's `basePath` and marker -- proceeds. `install` itself never cleans up an exposure a `config.yaml` edit made stale (a moved or narrowed/removed target); that reconciliation is `sync`'s job, described above. Remaining work for the "configurable multi-target tool exposure" effort (issue #38): richer CLI/JSON reporting of per-target detail for `scan`/`list` (the JSON report schema still surfaces only the first owned exposure per artifact, and per-(artifact, target) status reporting is still pending).
 
 ## Important Invariants
 
@@ -145,6 +164,7 @@ Reconciliation has no status for an unusable source. A skill whose Claude frontm
 - [src/cli.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/cli.ts:1): command parsing and top-level flows
 - [src/source.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/source.ts:1): source scanning
 - [src/install.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/install.ts:1): reconciliation, install, uninstall
+- [src/sync.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/sync.ts:1): exposure-only reconciliation against `config.yaml`, with no source contact
 - [src/state.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/state.ts:1): persisted managed state
 - [src/paths.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/paths.ts:1): target-path resolution
 - [src/hash.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/hash.ts:1): content hashing, including the materialized overlay used for expected source hashes
@@ -180,6 +200,7 @@ Key tests live in:
 - [tests/scanner.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/scanner.test.ts:1)
 - [tests/install.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/install.test.ts:1)
 - [tests/config.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/config.test.ts:1)
+- [tests/sync.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/sync.test.ts:1)
 
 ## Release
 

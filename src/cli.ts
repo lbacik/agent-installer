@@ -13,7 +13,9 @@ import {
   formatExposureConflictLine,
   formatOperationLine,
   formatRemovedLine,
-  formatSkippedExposureLine
+  formatSkippedExposureLine,
+  formatSyncActionLine,
+  formatSyncLegacyNoticeLine
 } from "./format.js";
 import { promptForManagedArtifactRemovals, promptForSelections } from "./interactive.js";
 import {
@@ -26,6 +28,7 @@ import {
 import { resolveTargetPaths } from "./paths.js";
 import { loadState } from "./state.js";
 import { withResolvedArtifactStates } from "./source-workflow.js";
+import { syncExposures } from "./sync.js";
 import type { ScanSourceOptions } from "./source.js";
 import type { ArtifactState } from "./types.js";
 
@@ -334,6 +337,44 @@ function createProgram(): Command {
 
         printJson(buildArtifactsErrorJson(error));
         process.exitCode = 1;
+      }
+    });
+
+  program
+    .command("sync")
+    .description("Reconcile installed artifacts' exposures against the current config.yaml, without touching sources or content.")
+    .option("--only <artifact-id>", "Sync only this artifact id, for example skill:review (repeatable)", collectOnly, [])
+    .option("--target <name>", "Sync only this config.yaml target name (repeatable)", collectOnly, [])
+    .option("--allow-conflicts", "Sync the eligible pairs and skip conflicting ones instead of aborting")
+    .option("--dry-run", "Print the planned actions without touching the filesystem or state")
+    .action(async (options: { only: string[]; target: string[]; allowConflicts?: boolean; dryRun?: boolean }) => {
+      const result = await syncExposures({
+        only: options.only.length > 0 ? options.only : undefined,
+        targets: options.target.length > 0 ? options.target : undefined,
+        allowConflicts: options.allowConflicts === true,
+        dryRun: options.dryRun === true
+      });
+
+      const printable = result.actions.filter((action) => action.action !== "match" && action.action !== "conflict");
+      const conflicts = result.actions.filter((action) => action.action === "conflict");
+
+      if (result.dryRun) {
+        console.log(`planned ${printable.length} change(s)`);
+      }
+
+      printLines(printable.map(formatSyncActionLine));
+      const conflictPrefix = result.dryRun ? "would skip" : "skipped";
+      for (const conflict of conflicts) {
+        console.error(`${conflictPrefix} ${formatSyncActionLine(conflict)}`);
+      }
+
+      printLines(result.legacyNotices.map(formatSyncLegacyNoticeLine));
+      for (const skipped of result.skippedOrphanRemovals) {
+        console.error(formatSkippedExposureLine(skipped));
+      }
+
+      if (!result.dryRun && printable.length === 0 && result.legacyNotices.length === 0) {
+        console.log("Nothing to sync.");
       }
     });
 

@@ -1,6 +1,14 @@
 import pc from "picocolors";
 import path from "node:path";
-import { ArtifactState, ExposureConflictSummary, ManagedEntry, RemovedArtifactState, SkippedExposureRemoval } from "./types.js";
+import {
+  ArtifactState,
+  ExposureConflictSummary,
+  ManagedEntry,
+  RemovedArtifactState,
+  SkippedExposureRemoval,
+  SyncAction,
+  SyncLegacyNotice
+} from "./types.js";
 
 function colorizeStatus(status: ArtifactState["status"] | RemovedArtifactState["status"]): string {
   switch (status) {
@@ -82,4 +90,23 @@ export function formatExposureConflictLine(conflict: ExposureConflictSummary): s
 export function formatSkippedExposureLine(skipped: SkippedExposureRemoval): string {
   const target = skipped.targetName ?? "legacy";
   return `skipped removing ${skipped.id} exposure for target "${target}" at ${skipped.path} (no longer an owned symlink)`;
+}
+
+export function formatSyncActionLine(action: SyncAction): string {
+  switch (action.action) {
+    case "create":
+      return `create ${action.id} -> ${action.targetName}:${action.path}`;
+    case "move":
+      return `move ${action.id} -> ${action.targetName}:${action.previousPath} => ${action.path}`;
+    case "remove-orphan":
+      return `remove ${action.id} -> ${action.targetName}:${action.path} (orphaned)`;
+    case "match":
+      return `match ${action.id} -> ${action.targetName}:${action.path}`;
+    case "conflict":
+      return `conflict ${action.id} -> ${action.targetName}:${action.path} (${action.reason ?? "conflict"})`;
+  }
+}
+
+export function formatSyncLegacyNoticeLine(notice: SyncLegacyNotice): string {
+  return `notice ${notice.id} has a legacy exposure at ${notice.path} (never touched by sync)`;
 }

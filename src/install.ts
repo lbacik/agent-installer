@@ -9,6 +9,7 @@ import { loadState, saveState } from "./state.js";
 import type { ScanSourceOptions } from "./source.js";
 import { resolveSourceInput, type ResolveSourceOptions } from "./source-resolver.js";
 import {
+  ArtifactKind,
   ArtifactState,
   DiscoveredArtifact,
   ExposureConflictSummary,
@@ -97,17 +98,17 @@ async function removePath(targetPath: string): Promise<void> {
   await fs.rm(targetPath, { recursive: true, force: true });
 }
 
-function exposureKindOf(kind: DiscoveredArtifact["kind"]): ExposureKind {
+export function exposureKindOf(kind: ArtifactKind): ExposureKind {
   return kind === "skill" ? "skills" : "prompts";
 }
 
 // Computes, for one artifact, the desired exposure at every currently configured target
 // that declares its kind. Never touches disk beyond reading whether a path exists and,
 // if so, what it links to -- callers decide whether/how to act on the plan.
-async function buildExposurePlan(
+export async function buildExposurePlan(
   config: AgentInstallerConfig | null,
   home: string,
-  artifact: DiscoveredArtifact,
+  artifact: Pick<DiscoveredArtifact, "kind" | "name">,
   basePath: string
 ): Promise<ExposurePlanEntry[]> {
   if (config === null) {
@@ -147,6 +148,41 @@ async function buildExposurePlan(
   return plan;
 }
 
+// Creates (or repairs) one owned exposure symlink and verifies it actually resolves to
+// basePath afterward. Shared by install's applyExposurePlan and sync's
+// applyEntrySyncActions so both create exposures the same way.
+export async function createOwnedSymlink(basePath: string, targetPath: string): Promise<boolean> {
+  try {
+    await ensureParentDir(targetPath);
+    await removePath(targetPath);
+    await fs.symlink(basePath, targetPath);
+  } catch {
+    return false;
+  }
+
+  return (await readSymlinkTarget(targetPath)) === basePath;
+}
+
+export type RevalidatedRemoval = "removed" | "already-gone" | "foreign";
+
+// Immediately before deleting an exposure symlink, revalidates it is still an owned
+// symlink to basePath (ownership revalidation). A path already gone is treated as
+// nothing to report; a path a foreign file/dir/symlink has since replaced is left
+// alone. Shared by install's removeArtifacts and sync's applyEntrySyncActions so both
+// delete exposures under the same safety rule.
+export async function revalidateAndRemove(targetPath: string, basePath: string): Promise<RevalidatedRemoval> {
+  if (!(await pathExists(targetPath))) {
+    return "already-gone";
+  }
+
+  if ((await readSymlinkTarget(targetPath)) !== basePath) {
+    return "foreign";
+  }
+
+  await removePath(targetPath);
+  return "removed";
+}
+
 // Applies one artifact's exposure plan, best-effort per target: a "new" entry is
 // (re)created, a "match" entry is left alone, and a "conflict" entry is never touched.
 // A failed creation is skipped rather than retried or rolled back, so a later target's
@@ -171,15 +207,7 @@ async function applyExposurePlan(
       continue;
     }
 
-    try {
-      await ensureParentDir(entry.path);
-      await removePath(entry.path);
-      await fs.symlink(basePath, entry.path);
-    } catch {
-      continue;
-    }
-
-    if ((await readSymlinkTarget(entry.path)) === basePath) {
+    if (await createOwnedSymlink(basePath, entry.path)) {
       byPath.set(entry.path, { path: entry.path, targetName: entry.targetName });
     }
   }
@@ -407,13 +435,7 @@ export async function removeArtifacts(ids: string[], home?: string): Promise<Rem
 
     const retainedExposures: ExposureRecord[] = [];
     for (const exposure of entry.exposures) {
-      if (!(await pathExists(exposure.path))) {
-        continue;
-      }
-
-      if ((await readSymlinkTarget(exposure.path)) === entry.basePath) {
-        await removePath(exposure.path);
-      } else {
+      if ((await revalidateAndRemove(exposure.path, entry.basePath)) === "foreign") {
         retainedExposures.push(exposure);
         skippedExposures.push({ id, path: exposure.path, targetName: exposure.targetName });
       }
