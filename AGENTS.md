@@ -7,7 +7,7 @@ This repository contains `agent-installer`, a TypeScript CLI that installs local
 - Codex
 - Claude Code
 
-The tool scans a local repository, copies managed artifacts into `~/.agents`, and exposes Claude-compatible entries through per-artifact symlinks in `~/.claude`.
+The tool scans a local repository, copies managed artifacts into `~/.agents`, and exposes entries through per-artifact symlinks at the targets named in `config.yaml` (for example Claude-compatible entries in `~/.claude`).
 
 ## Artifact Model
 
@@ -93,7 +93,7 @@ Implemented commands:
   - applied to the reconciled set, so conflict handling (including `--allow-conflicts`) behaves as it does under
     `--all`; unselected artifacts are left untouched
 - `agent-installer install [path] --all --prune` (or `--only ... --prune`)
-  - `--prune` deletes managed files: it removes the base-store copy, the Claude exposure symlink, and the state
+  - `--prune` deletes managed files: it removes the base-store copy, every recorded exposure symlink, and the state
     entry for every artifact reconciled as `source-missing` for the scanned source
   - opt-in and off by default; combines with `--only`, pruning only what the source no longer offers while leaving
     merely-unselected artifacts installed
@@ -148,13 +148,13 @@ Meaning:
 
 Reconciliation has no status for an unusable source. A skill whose Claude frontmatter enables the Codex invocation-policy translation but whose authored `agents/openai.yaml` cannot be parsed aborts the whole run, including `scan`, with a source-configuration error, so no managed artifact is created or changed from an ambiguous configuration.
 
-**Exposure installation:** `install` creates or repairs one exposure symlink per (artifact, target) pair for every `config.yaml` target that declares the artifact's kind (a `skills` key for a skill, a `prompts` key for a prompt). No `config.yaml` still means base-store-only installation, exactly as before. A basePath conflict blocks the whole artifact; an exposure-level conflict blocks only that pair -- with no `--allow-conflicts`, `install --all`/`--only` abort the entire run naming every conflicting (artifact, target) pair and change nothing, and with `--allow-conflicts` the conflicting pairs are skipped and reported while every other exposure and artifact installs normally. Installing one artifact's several targets is best-effort: a later target's failure never rolls back an earlier target's success, and `exposures[]` always reflects exactly what verified on disk after the run. `uninstall` and `prune`'s `source-missing` cleanup revalidate that each recorded exposure is still an owned symlink to the entry's `basePath` immediately before deleting it; a foreign replacement is left alone and its record retained (reported on stderr) instead of being silently dropped, while the rest of the run -- including that same artifact's `basePath` and marker -- proceeds. `install` itself never cleans up an exposure a `config.yaml` edit made stale (a moved or narrowed/removed target); that reconciliation is `sync`'s job, described above. Remaining work for the "configurable multi-target tool exposure" effort (issue #38): richer CLI/JSON reporting of per-target detail for `scan`/`list` (the JSON report schema still surfaces only the first owned exposure per artifact, and per-(artifact, target) status reporting is still pending).
+**Exposure installation:** `install` creates or repairs one exposure symlink per (artifact, target) pair for every `config.yaml` target that declares the artifact's kind (a `skills` key for a skill, a `prompts` key for a prompt). No `config.yaml` still means base-store-only installation, exactly as before. A basePath conflict blocks the whole artifact; an exposure-level conflict blocks only that pair -- with no `--allow-conflicts`, `install --all`/`--only` abort the entire run naming every conflicting (artifact, target) pair and change nothing, and with `--allow-conflicts` the conflicting pairs are skipped and reported while every other exposure and artifact installs normally. Installing one artifact's several targets is best-effort: a later target's failure never rolls back an earlier target's success, and `exposures[]` always reflects exactly what verified on disk after the run. `uninstall` and `prune`'s `source-missing` cleanup revalidate that each recorded exposure is still an owned symlink to the entry's `basePath` immediately before deleting it; a foreign replacement is left alone and its record retained (reported on stderr) instead of being silently dropped, while the rest of the run -- including that same artifact's `basePath` and marker -- proceeds. `install` itself never cleans up an exposure a `config.yaml` edit made stale (a moved or narrowed/removed target); that reconciliation is `sync`'s job, described above.
 
 ## Important Invariants
 
-- `~/.agents` is the canonical store. Do not install directly into `~/.claude`.
-- Never symlink the entire `~/.claude/skills` or `~/.claude/commands` directory.
-- Only create per-artifact symlinks in `~/.claude`.
+- `~/.agents` is the canonical store. Do not install directly into a configured target directory.
+- Never symlink an entire target directory (for example `~/.claude/skills` or `~/.claude/commands`).
+- Only create per-artifact symlinks in configured target directories.
 - Refuse unmanaged conflicts by default. Do not silently overwrite user-owned files.
 - Source scoping matters for cleanup. `source-missing` must only apply to entries owned by the currently scanned repository.
 - Hash comparisons define whether an artifact is unchanged or requires update.
