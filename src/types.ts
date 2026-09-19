@@ -1,5 +1,8 @@
 export type ArtifactKind = "skill" | "prompt";
 
+/** A `config.yaml` target's exposure kind: which directory field an artifact kind maps to. */
+export type ExposureKind = "skills" | "prompts";
+
 export type ArtifactStatus =
   | "new"
   | "installed-same"
@@ -27,6 +30,43 @@ export interface DiscoveredArtifact {
 export interface ExposureRecord {
   path: string;
   targetName: string | null;
+}
+
+/**
+ * The reconciled state of one desired (artifact, target) exposure, derived from the
+ * current `config.yaml` targets that declare the artifact's kind. `"new"` means the
+ * path does not exist yet and can be created; `"match"` means an owned symlink is
+ * already in place; `"conflict"` means the path exists but is not a symlink to the
+ * artifact's `basePath`, so this pair alone is skipped without blocking the artifact's
+ * base-store install or its other exposures.
+ */
+export type ExposurePlanStatus = "new" | "match" | "conflict";
+
+export interface ExposurePlanEntry {
+  targetName: string;
+  kind: ExposureKind;
+  path: string;
+  status: ExposurePlanStatus;
+  /** Set when status is "conflict". */
+  reason?: string;
+}
+
+/** An exposure `removeArtifacts` could not delete because it no longer verified as an
+ * owned symlink to the entry's basePath immediately before deletion (ownership
+ * revalidation). The record is retained in state rather than silently dropped. */
+export interface SkippedExposureRemoval {
+  id: string;
+  path: string;
+  targetName: string | null;
+}
+
+/** One (artifact, target) pair skipped during install because its exposurePlan entry is a conflict. */
+export interface ExposureConflictSummary {
+  id: string;
+  targetName: string;
+  kind: ExposureKind;
+  path: string;
+  reason: string;
 }
 
 export interface ManagedEntry {
@@ -57,6 +97,13 @@ export interface ArtifactState {
   conflictReason?: string;
   /** The specific filesystem path (currently always basePath) that a "conflict" status refers to. */
   conflictPath?: string;
+  /**
+   * The desired exposure for every currently configured target that declares this
+   * artifact's kind, one entry per (target, kind). Empty when `config.yaml` has no
+   * such target, or when `status` is "conflict" (a basePath conflict blocks the whole
+   * artifact, so its exposures are never evaluated).
+   */
+  exposurePlan: ExposurePlanEntry[];
 }
 
 export interface RemovedArtifactState {

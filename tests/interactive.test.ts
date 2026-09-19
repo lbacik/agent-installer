@@ -59,6 +59,7 @@ function makeState(id: string, status: ArtifactState["status"], conflictReason?:
     installedHash: status === "new" ? null : "installed-hash",
     status,
     managedEntry,
+    exposurePlan: [],
     ...(conflictReason === undefined ? {} : { conflictReason })
   };
 }

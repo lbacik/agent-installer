@@ -25,6 +25,7 @@ function makeState(
     installedHash: status === "new" ? null : "installed-hash",
     status,
     managedEntry: null,
+    exposurePlan: [],
     ...(conflictReason === undefined ? {} : { conflictReason }),
     ...(conflictPath === undefined ? {} : { conflictPath })
   };
