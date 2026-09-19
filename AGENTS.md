@@ -121,6 +121,8 @@ Meaning:
 
 Reconciliation has no status for an unusable source. A skill whose Claude frontmatter enables the Codex invocation-policy translation but whose authored `agents/openai.yaml` cannot be parsed aborts the whole run, including `scan`, with a source-configuration error, so no managed artifact is created or changed from an ambiguous configuration.
 
+**In progress:** as of the "configurable multi-target tool exposure" work (issue #38 and its phased children), `install` no longer creates a Claude exposure symlink for newly installed artifacts, and status above is reconciled purely from base-store content until a configuration module and per-target install granularity land (later phases). Only artifacts with a real, previously migrated exposure record still have it checked and removed on `uninstall`/`prune`. This paragraph and the bullets above will be reconciled once that work completes.
+
 ## Important Invariants
 
 - `~/.agents` is the canonical store. Do not install directly into `~/.claude`.

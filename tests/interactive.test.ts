@@ -39,7 +39,7 @@ function makeState(id: string, status: ArtifactState["status"], conflictReason?:
           sourceRoot: "/repo",
           relativeSourcePath: kind === "skill" ? `skills/${name}` : `prompts/${name}.md`,
           basePath: `/home/.agents/${name}`,
-          exposurePath: `/home/.claude/${name}`,
+          exposures: [],
           sourceHash: "source-hash",
           installedHash: "installed-hash",
           installedAt: "2026-07-08T00:00:00.000Z"
@@ -55,7 +55,6 @@ function makeState(id: string, status: ArtifactState["status"], conflictReason?:
     },
     id,
     basePath: `/home/.agents/${name}`,
-    exposurePath: `/home/.claude/${name}`,
     sourceHash: "source-hash",
     installedHash: status === "new" ? null : "installed-hash",
     status,
@@ -71,7 +70,7 @@ const removedManagedEntry: ManagedEntry = {
   sourceRoot: "/repo",
   relativeSourcePath: "prompts/old.md",
   basePath: "/home/.agents/old",
-  exposurePath: "/home/.claude/old",
+  exposures: [],
   sourceHash: "source-hash",
   installedHash: "installed-hash",
   installedAt: "2026-07-08T00:00:00.000Z"
@@ -82,7 +81,6 @@ const removedEntry: RemovedArtifactState = {
   kind: "prompt",
   name: "old",
   basePath: "/home/.agents/old",
-  exposurePath: "/home/.claude/old",
   managedEntry: removedManagedEntry,
   status: "source-missing"
 };

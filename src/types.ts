@@ -19,6 +19,16 @@ export interface DiscoveredArtifact {
   resolvedCommit?: string | undefined;
 }
 
+/**
+ * A single exposure symlink this tool owns for a managed artifact. `targetName` is the
+ * `config.yaml` target that produced it, or `null` for exposures that predate `config.yaml`
+ * (legacy, or otherwise unnamed). Ownership is keyed by `path`, never by `targetName`.
+ */
+export interface ExposureRecord {
+  path: string;
+  targetName: string | null;
+}
+
 export interface ManagedEntry {
   id: string;
   kind: ArtifactKind;
@@ -26,7 +36,7 @@ export interface ManagedEntry {
   sourceRoot: string;
   relativeSourcePath: string;
   basePath: string;
-  exposurePath: string;
+  exposures: ExposureRecord[];
   sourceHash: string;
   installedHash: string;
   installedAt: string;
@@ -40,13 +50,12 @@ export interface ArtifactState {
   artifact: DiscoveredArtifact;
   id: string;
   basePath: string;
-  exposurePath: string;
   sourceHash: string;
   installedHash: string | null;
   status: ArtifactStatus;
   managedEntry: ManagedEntry | null;
   conflictReason?: string;
-  /** The specific filesystem path (basePath or exposurePath) that a "conflict" status refers to. */
+  /** The specific filesystem path (currently always basePath) that a "conflict" status refers to. */
   conflictPath?: string;
 }
 
@@ -55,7 +64,6 @@ export interface RemovedArtifactState {
   name: string;
   kind: ArtifactKind;
   basePath: string;
-  exposurePath: string;
   status: "source-missing";
   managedEntry: ManagedEntry;
 }

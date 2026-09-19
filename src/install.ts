@@ -2,12 +2,12 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { formatConflictLine } from "./format.js";
 import { hashArtifact } from "./hash.js";
-import { artifactId, getBasePath, getExposurePath, getMarkerPath, resolveTargetPaths, TargetPaths } from "./paths.js";
+import { artifactId, getBasePath, getMarkerPath, resolveTargetPaths, TargetPaths } from "./paths.js";
 import { materializeOverlay, resolveInvocationPolicyOverlay } from "./skill-invocation-policy.js";
 import { loadState, saveState } from "./state.js";
 import type { ScanSourceOptions } from "./source.js";
 import { resolveSourceInput, type ResolveSourceOptions } from "./source-resolver.js";
-import { ArtifactState, DiscoveredArtifact, ManagedEntry, OverlayFile, RemovedArtifactState } from "./types.js";
+import { ArtifactState, DiscoveredArtifact, ExposureRecord, ManagedEntry, OverlayFile, RemovedArtifactState } from "./types.js";
 
 // Thrown by installAllFromSource when unmanaged conflicts block the install and --allow-conflicts was not passed.
 export class InstallConflictError extends Error {
@@ -107,11 +107,15 @@ async function writeMarker(entry: ManagedEntry): Promise<void> {
   await fs.writeFile(markerPath, `${JSON.stringify({ id: entry.id, installedAt: entry.installedAt }, null, 2)}\n`, "utf8");
 }
 
+// `existingExposures` carries forward whatever exposures a prior install already owns
+// (e.g. a legacy Claude symlink migrated from state v2) so re-installing to update
+// content never silently drops the installer's record of them.
 function buildManagedEntry(
   artifact: DiscoveredArtifact,
   paths: TargetPaths,
   sourceHash: string,
-  installedHash: string
+  installedHash: string,
+  existingExposures: ExposureRecord[]
 ): ManagedEntry {
   return {
     id: artifactId(artifact.kind, artifact.name),
@@ -120,7 +124,7 @@ function buildManagedEntry(
     sourceRoot: artifact.sourceRoot,
     relativeSourcePath: artifact.relativeSourcePath,
     basePath: getBasePath(paths, artifact),
-    exposurePath: getExposurePath(paths, artifact),
+    exposures: existingExposures,
     sourceHash,
     installedHash,
     installedAt: new Date().toISOString(),
@@ -149,7 +153,6 @@ export async function collectArtifactStates(
     const sourceHash = await hashArtifact(artifact.kind, artifact.sourcePath, overlay);
     const managedEntry = entriesById.get(id) ?? null;
     const basePath = getBasePath(paths, artifact);
-    const exposurePath = getExposurePath(paths, artifact);
 
     let status: ArtifactState["status"] = "new";
     let installedHash: string | null = null;
@@ -157,46 +160,23 @@ export async function collectArtifactStates(
     let conflictPath: string | undefined;
 
     const baseExists = await pathExists(basePath);
-    const exposureExists = await pathExists(exposurePath);
 
-    if (!baseExists && !exposureExists) {
+    if (!baseExists) {
       status = "new";
     } else if (managedEntry && managedEntry.sourceRoot === artifact.sourceRoot) {
-      if (baseExists) {
-        installedHash = await hashArtifact(artifact.kind, basePath);
-      }
-
-      const symlinkTarget = exposureExists ? await readSymlinkTarget(exposurePath) : null;
-      const expectedTarget = basePath;
-      const exposureMatches = exposureExists && symlinkTarget === expectedTarget;
-      const exposureConflict = exposureExists && !exposureMatches;
-
-      if (exposureConflict) {
-        status = "conflict";
-        conflictReason = `Exposure path already exists and does not point to "${expectedTarget}".`;
-        conflictPath = exposurePath;
-      } else if (installedHash === sourceHash && exposureMatches) {
-        status = "installed-same";
-      } else {
-        status = "installed-different";
-      }
+      installedHash = await hashArtifact(artifact.kind, basePath);
+      status = installedHash === sourceHash ? "installed-same" : "installed-different";
     } else {
       status = "conflict";
-      if (baseExists) {
-        conflictReason = "A target path already exists but is not managed by this installer.";
-        conflictPath = basePath;
-        installedHash = await hashArtifact(artifact.kind, basePath);
-      } else {
-        conflictReason = "The Claude exposure path already exists but is not managed by this installer.";
-        conflictPath = exposurePath;
-      }
+      conflictReason = "A target path already exists but is not managed by this installer.";
+      conflictPath = basePath;
+      installedHash = await hashArtifact(artifact.kind, basePath);
     }
 
     const nextState: ArtifactState = {
       artifact,
       id,
       basePath,
-      exposurePath,
       sourceHash,
       installedHash,
       status,
@@ -223,7 +203,6 @@ export async function collectArtifactStates(
       name: entry.name,
       kind: entry.kind,
       basePath: entry.basePath,
-      exposurePath: entry.exposurePath,
       status: "source-missing" as const,
       managedEntry: entry
     }));
@@ -243,18 +222,16 @@ export async function installArtifacts(states: ArtifactState[], home?: string): 
     }
 
     await copyArtifact(current.artifact, current.basePath);
-    await ensureParentDir(current.exposurePath);
-    await removePath(current.exposurePath);
-    await fs.symlink(current.basePath, current.exposurePath);
 
     const installedHash = await hashArtifact(current.artifact.kind, current.basePath);
-    const entry = buildManagedEntry(current.artifact, paths, current.sourceHash, installedHash);
+    const existingExposures = entries.get(current.id)?.exposures ?? [];
+    const entry = buildManagedEntry(current.artifact, paths, current.sourceHash, installedHash, existingExposures);
     await writeMarker(entry);
     entries.set(entry.id, entry);
     installed.push(entry);
   }
 
-  await saveState(paths, { version: 2, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
+  await saveState(paths, { version: 3, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
   return installed;
 }
 
@@ -270,14 +247,17 @@ export async function removeArtifacts(ids: string[], home?: string): Promise<Man
       continue;
     }
 
-    await removePath(entry.exposurePath);
+    for (const exposure of entry.exposures) {
+      await removePath(exposure.path);
+    }
+
     await removePath(entry.basePath);
     await removePath(getMarkerPath(entry.basePath, entry.kind));
     entries.delete(id);
     removed.push(entry);
   }
 
-  await saveState(paths, { version: 2, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
+  await saveState(paths, { version: 3, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
   return removed;
 }
 

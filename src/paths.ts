@@ -41,14 +41,6 @@ export function getBasePath(paths: TargetPaths, artifact: Pick<DiscoveredArtifac
   return path.join(paths.agentsPromptsDir, `${artifact.name}.md`);
 }
 
-export function getExposurePath(paths: TargetPaths, artifact: Pick<DiscoveredArtifact, "kind" | "name">): string {
-  if (artifact.kind === "skill") {
-    return path.join(paths.claudeSkillsDir, artifact.name);
-  }
-
-  return path.join(paths.claudeCommandsDir, `${artifact.name}.md`);
-}
-
 export function toSystemPath(basePath: string, relativePath: string): string {
   return path.join(basePath, ...relativePath.split("/"));
 }

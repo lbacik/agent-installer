@@ -18,13 +18,13 @@ afterEach(async () => {
 });
 
 describe("state", () => {
-  it("starts a fresh version 2 state file when none exists", async () => {
+  it("starts a fresh version 3 state file when none exists", async () => {
     const home = await makeTempDir("agent-installer-home-");
     const state = await loadState(resolveTargetPaths(home));
-    expect(state).toEqual({ version: 2, entries: [] });
+    expect(state).toEqual({ version: 3, entries: [] });
   });
 
-  it("migrates a version 1 state file, splitting the ref fragment out of sourceRoot", async () => {
+  it("migrates a version 1 state file straight through to version 3", async () => {
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
     await fs.mkdir(paths.stateDir, { recursive: true });
@@ -63,20 +63,25 @@ describe("state", () => {
     );
 
     const state = await loadState(paths);
-    expect(state.version).toBe(2);
+    expect(state.version).toBe(3);
     expect(state.entries[0]).toMatchObject({
       sourceRoot: "git+https://github.com/org/repo.git",
-      requestedRef: "release/v1"
+      requestedRef: "release/v1",
+      exposures: [{ path: "/home/user/.claude/skills/review", targetName: null }]
     });
     expect(state.entries[0]?.resolvedCommit).toBeUndefined();
-    expect(state.entries[1]).toMatchObject({ sourceRoot: "/local/repo" });
+    expect(state.entries[1]).toMatchObject({
+      sourceRoot: "/local/repo",
+      exposures: [{ path: "/home/user/.claude/commands/commit-message.md", targetName: null }]
+    });
     expect(state.entries[1]?.requestedRef).toBeUndefined();
 
     const persisted = JSON.parse(await fs.readFile(paths.stateFile, "utf8"));
-    expect(persisted.version).toBe(2);
+    expect(persisted.version).toBe(3);
+    expect(persisted.entries[0].exposurePath).toBeUndefined();
   });
 
-  it("loads a version 2 state file as-is", async () => {
+  it("migrates a version 2 state file to version 3, wrapping exposurePath into a legacy exposure record", async () => {
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
     await fs.mkdir(paths.stateDir, { recursive: true });
@@ -105,14 +110,55 @@ describe("state", () => {
     );
 
     const state = await loadState(paths);
-    expect(state.entries[0]).toMatchObject({ requestedRef: "main", resolvedCommit: "a".repeat(40) });
+    expect(state.version).toBe(3);
+    expect(state.entries[0]).toMatchObject({
+      requestedRef: "main",
+      resolvedCommit: "a".repeat(40),
+      exposures: [{ path: "/home/user/.claude/skills/review", targetName: null }]
+    });
+    expect((state.entries[0] as unknown as { exposurePath?: unknown }).exposurePath).toBeUndefined();
+
+    const persisted = JSON.parse(await fs.readFile(paths.stateFile, "utf8"));
+    expect(persisted.version).toBe(3);
+  });
+
+  it("loads a version 3 state file as-is", async () => {
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    await fs.mkdir(paths.stateDir, { recursive: true });
+    await fs.writeFile(
+      paths.stateFile,
+      JSON.stringify({
+        version: 3,
+        entries: [
+          {
+            id: "skill:review",
+            kind: "skill",
+            name: "review",
+            sourceRoot: "git+https://github.com/org/repo.git",
+            relativeSourcePath: "skills/review",
+            basePath: "/home/user/.agents/skills/review",
+            exposures: [],
+            sourceHash: "source-hash",
+            installedHash: "installed-hash",
+            installedAt: "2026-07-08T00:00:00.000Z",
+            requestedRef: "main",
+            resolvedCommit: "a".repeat(40)
+          }
+        ]
+      }),
+      "utf8"
+    );
+
+    const state = await loadState(paths);
+    expect(state.entries[0]).toMatchObject({ requestedRef: "main", resolvedCommit: "a".repeat(40), exposures: [] });
   });
 
   it("round-trips a saved state through loadState unchanged", async () => {
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
     const written: import("../src/state.js").InstallerState = {
-      version: 2,
+      version: 3,
       entries: [
         {
           id: "skill:review",
@@ -121,7 +167,7 @@ describe("state", () => {
           sourceRoot: "/local/repo",
           relativeSourcePath: "skills/review",
           basePath: "/home/user/.agents/skills/review",
-          exposurePath: "/home/user/.claude/skills/review",
+          exposures: [{ path: "/home/user/.claude/skills/review", targetName: "claude" }],
           sourceHash: "source-hash",
           installedHash: "installed-hash",
           installedAt: "2026-07-08T00:00:00.000Z"
@@ -137,8 +183,43 @@ describe("state", () => {
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
     await fs.mkdir(paths.stateDir, { recursive: true });
-    await fs.writeFile(paths.stateFile, JSON.stringify({ version: 3, entries: [] }), "utf8");
+    await fs.writeFile(paths.stateFile, JSON.stringify({ version: 99, entries: [] }), "utf8");
 
     await expect(loadState(paths)).rejects.toThrow(/version/i);
+  });
+
+  it("never leaves state.json partially written, and a retry resumes cleanly", async () => {
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    const goodState: import("../src/state.js").InstallerState = { version: 3, entries: [] };
+    await saveState(paths, goodState);
+
+    // Simulate a crash between writing the temp file and renaming it into place: the
+    // temp file exists with different content, but state.json itself was never touched.
+    const staleTempFile = path.join(paths.stateDir, ".state.json.stale.tmp");
+    await fs.writeFile(staleTempFile, "{not valid json", "utf8");
+
+    expect(await loadState(paths)).toEqual(goodState);
+    expect(await fs.readFile(paths.stateFile, "utf8")).toBe(`${JSON.stringify(goodState, null, 2)}\n`);
+
+    const nextState: import("../src/state.js").InstallerState = {
+      version: 3,
+      entries: [
+        {
+          id: "skill:review",
+          kind: "skill",
+          name: "review",
+          sourceRoot: "/local/repo",
+          relativeSourcePath: "skills/review",
+          basePath: "/home/user/.agents/skills/review",
+          exposures: [],
+          sourceHash: "source-hash",
+          installedHash: "installed-hash",
+          installedAt: "2026-07-08T00:00:00.000Z"
+        }
+      ]
+    };
+    await saveState(paths, nextState);
+    expect(await loadState(paths)).toEqual(nextState);
   });
 });
