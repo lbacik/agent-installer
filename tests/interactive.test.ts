@@ -4,7 +4,7 @@ import pc from "picocolors";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import { promptForManagedArtifactRemovals, promptForSelections } from "../src/interactive.js";
-import type { ArtifactState, ManagedEntry, RemovedArtifactState } from "../src/types.js";
+import type { ArtifactState, ExposurePlanEntry, ExposureState, ManagedEntry, RemovedArtifactState } from "../src/types.js";
 
 vi.mock("@inquirer/prompts", () => ({
   checkbox: vi.fn(),
@@ -27,7 +27,13 @@ function promptAbortError(): Error {
   return error;
 }
 
-function makeState(id: string, status: ArtifactState["status"], conflictReason?: string): ArtifactState {
+function makeState(
+  id: string,
+  status: ArtifactState["status"],
+  conflictReason?: string,
+  exposures: ExposureState[] = [],
+  exposurePlan: ExposurePlanEntry[] = []
+): ArtifactState {
   const [kind, name] = id.split(":") as [ArtifactState["artifact"]["kind"], string];
   const managedEntry: ManagedEntry | null =
     status === "new"
@@ -59,7 +65,8 @@ function makeState(id: string, status: ArtifactState["status"], conflictReason?:
     installedHash: status === "new" ? null : "installed-hash",
     status,
     managedEntry,
-    exposurePlan: [],
+    exposurePlan,
+    exposures,
     ...(conflictReason === undefined ? {} : { conflictReason })
   };
 }
@@ -163,6 +170,71 @@ describe("promptForSelections", () => {
     const checkboxConfig = checkboxMock.mock.calls[0]?.[0] as { theme?: { style?: { disabled?: (text: string) => string } } };
     expect(checkboxConfig.theme?.style?.disabled?.("● prompt:commit-message [conflict] reason")).toContain(
       " ● prompt:commit-message [conflict] reason"
+    );
+  });
+
+  it("appends a per-target breakdown to the row label when targets diverge", async () => {
+    checkboxMock.mockImplementation(() => promptPromise(Promise.resolve([])));
+
+    await promptForSelections(
+      [
+        makeState("skill:review", "installed-different", undefined, [
+          { targetName: "claude", path: "/c/review", status: "installed-same" },
+          { targetName: "vscode", path: "/v/review", status: "new" }
+        ])
+      ],
+      []
+    );
+
+    expect(checkboxMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        choices: expect.arrayContaining([
+          expect.objectContaining({
+            name: expect.stringContaining("skill:review [installed-different] [claude: same, vscode: new]"),
+            value: "skill:review",
+            disabled: false
+          })
+        ])
+      }),
+      expect.any(Object)
+    );
+  });
+
+  it("leaves the row selectable for a single-exposure conflict", async () => {
+    checkboxMock.mockImplementation(() => promptPromise(Promise.resolve([])));
+
+    await promptForSelections(
+      [
+        makeState(
+          "skill:review",
+          "installed-different",
+          undefined,
+          [
+            {
+              targetName: "claude",
+              path: "/c/review",
+              status: "conflict",
+              conflictReason: "taken",
+              conflictPath: "/c/review"
+            }
+          ],
+          [{ targetName: "claude", kind: "skills", path: "/c/review", status: "conflict", reason: "taken" }]
+        )
+      ],
+      []
+    );
+
+    expect(checkboxMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        choices: expect.arrayContaining([
+          expect.objectContaining({
+            name: expect.stringContaining("skill:review [installed-different] [claude: conflict]"),
+            value: "skill:review",
+            disabled: false
+          })
+        ])
+      }),
+      expect.any(Object)
     );
   });
 

@@ -35,7 +35,8 @@ function makeState(id: string, status: ArtifactState["status"] = "new"): Artifac
     installedHash: status === "new" ? null : "installed-hash",
     status,
     managedEntry,
-    exposurePlan: []
+    exposurePlan: [],
+    exposures: []
   };
 }
 

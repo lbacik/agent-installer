@@ -1,8 +1,8 @@
 import { checkbox, confirm } from "@inquirer/prompts";
 import pc from "picocolors";
 import type { Key } from "node:readline";
-import { formatManagedEntryLines } from "./format.js";
-import type { ArtifactState, ManagedEntry, RemovedArtifactState } from "./types.js";
+import { exposureBreakdownSuffix, formatManagedEntryLines } from "./format.js";
+import type { ArtifactState, ExposureState, ManagedEntry, RemovedArtifactState } from "./types.js";
 
 export interface InteractiveSelection {
   cancelled: false;
@@ -31,6 +31,8 @@ interface PromptContext {
 
 export interface PromptForSelectionsOptions extends PromptContext {
   listLength?: number;
+  /** Per-artifact exposures for the managed-artifact removal prompt, keyed by id. */
+  exposureBreakdowns?: Map<string, ExposureState[]>;
 }
 
 interface TerminalSizeOutput {
@@ -67,7 +69,7 @@ function resolveListLength(choiceCount: number, requestedLength: number | undefi
 }
 
 function formatChoiceName(state: ArtifactState): string {
-  const label = `${state.id} [${state.status}]`;
+  const label = `${state.id} [${state.status}]${exposureBreakdownSuffix(state.status, state.exposures)}`;
   return state.status === "conflict" ? `${pc.red("●")} ${label}` : label;
 }
 
@@ -187,7 +189,7 @@ export async function promptForManagedArtifactRemovals(
 ): Promise<ManagedArtifactRemovalResult> {
   const output = context.output ?? process.stdout;
   const listLength = resolveListLength(entries.length, context.listLength, output);
-  const entryLines = formatManagedEntryLines(entries);
+  const entryLines = formatManagedEntryLines(entries, context.exposureBreakdowns);
   let selectedIds: Set<string>;
   try {
     selectedIds = new Set(

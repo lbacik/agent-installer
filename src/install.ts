@@ -11,11 +11,13 @@ import { resolveSourceInput, type ResolveSourceOptions } from "./source-resolver
 import {
   ArtifactKind,
   ArtifactState,
+  ArtifactStatus,
   DiscoveredArtifact,
   ExposureConflictSummary,
   ExposureKind,
   ExposurePlanEntry,
   ExposureRecord,
+  ExposureState,
   ManagedEntry,
   OverlayFile,
   RemovedArtifactState,
@@ -283,6 +285,94 @@ function buildManagedEntry(
   };
 }
 
+// Maps one desired exposure plan entry to its reportable ExposureState. A "match"
+// entry mirrors the content check (a correct link still serves stale content after
+// a source change); anything desired-but-not-"match" reports as its own drift
+// ("new") or blockage ("conflict"). Shared by scan's `collectArtifactStates` and
+// list's JSON reporting so both read the plan the same way.
+export function planEntryToExposureState(entry: ExposurePlanEntry, contentMatches: boolean): ExposureState {
+  if (entry.status === "conflict") {
+    return {
+      targetName: entry.targetName,
+      path: entry.path,
+      status: "conflict",
+      conflictReason: entry.reason ?? "conflict",
+      conflictPath: entry.path
+    };
+  }
+
+  if (entry.status === "new") {
+    return { targetName: entry.targetName, path: entry.path, status: "new" };
+  }
+
+  const status: ArtifactStatus = contentMatches ? "installed-same" : "installed-different";
+  return { targetName: entry.targetName, path: entry.path, status };
+}
+
+// Scan-side wrapper: when the base copy does not exist yet the whole artifact is
+// "new", so every desired exposure reports as "new" too, except conflicts,
+// which still report as conflicts so install can name them.
+function exposureStateForPlanEntry(
+  entry: ExposurePlanEntry,
+  contentMatches: boolean,
+  baseIsNew: boolean
+): ExposureState {
+  if (baseIsNew && entry.status !== "conflict") {
+    return { targetName: entry.targetName, path: entry.path, status: "new" };
+  }
+
+  return planEntryToExposureState(entry, contentMatches);
+}
+
+// Reports the legacy (`targetName: null`) exposures the installer still owns for
+// one artifact. Legacy links are never repaired or re-targeted here; a correct
+// link mirrors the content check, while a missing or foreign link reports as
+// drift (never as a conflict). Recorded exposures for named targets are sync's
+// domain and are intentionally left out: scan reports what is desired plus what
+// is legacy, not orphans awaiting `sync` cleanup.
+async function legacyExposureStates(
+  managedEntry: ManagedEntry | null,
+  plannedPaths: Set<string>,
+  basePath: string,
+  contentMatches: boolean,
+  baseIsNew: boolean
+): Promise<ExposureState[]> {
+  const states: ExposureState[] = [];
+  for (const record of managedEntry?.exposures ?? []) {
+    if (record.targetName !== null || plannedPaths.has(record.path)) {
+      continue;
+    }
+
+    let status: ArtifactStatus;
+    if (baseIsNew) {
+      status = "new";
+    } else {
+      const linkTarget = await readSymlinkTarget(record.path);
+      status = linkTarget === basePath ? (contentMatches ? "installed-same" : "installed-different") : "installed-different";
+    }
+
+    states.push({ targetName: null, path: record.path, status });
+  }
+
+  return states;
+}
+
+// Builds the reportable `exposures[]` for one artifact: one entry per desired
+// (target, kind) pair from the current `config.yaml`, plus one per owned legacy
+// exposure. Never called for a basePath conflict.
+async function buildExposureStates(
+  exposurePlan: ExposurePlanEntry[],
+  managedEntry: ManagedEntry | null,
+  basePath: string,
+  contentMatches: boolean,
+  baseIsNew: boolean
+): Promise<ExposureState[]> {
+  const states = exposurePlan.map((entry) => exposureStateForPlanEntry(entry, contentMatches, baseIsNew));
+  const plannedPaths = new Set(exposurePlan.map((entry) => entry.path));
+  states.push(...(await legacyExposureStates(managedEntry, plannedPaths, basePath, contentMatches, baseIsNew)));
+  return states;
+}
+
 export async function collectArtifactStates(
   sourceArtifacts: DiscoveredArtifact[],
   home?: string,
@@ -326,12 +416,19 @@ export async function collectArtifactStates(
     }
 
     // A basePath conflict blocks the whole artifact, so its exposures are never
-    // evaluated; otherwise a desired-but-missing exposure counts as drift, bumping an
-    // otherwise-unchanged artifact to "installed-different" so install picks it back up.
+    // evaluated; otherwise a desired-but-missing or conflicting exposure counts as
+    // drift, bumping an otherwise-unchanged artifact to "installed-different" so
+    // install picks it back up. A single-exposure conflict never sets the aggregate
+    // to "conflict"; only the basePath conflict above does that.
     const exposurePlan = status === "conflict" ? [] : await buildExposurePlan(config, resolvedHome, artifact, basePath);
-    if (status === "installed-same" && exposurePlan.some((entry) => entry.status === "new")) {
+    const contentMatches = status === "installed-same";
+    const baseIsNew = !baseExists;
+    if (status === "installed-same" && exposurePlan.some((entry) => entry.status !== "match")) {
       status = "installed-different";
     }
+
+    const exposures =
+      status === "conflict" ? [] : await buildExposureStates(exposurePlan, managedEntry, basePath, contentMatches, baseIsNew);
 
     const nextState: ArtifactState = {
       artifact,
@@ -340,6 +437,7 @@ export async function collectArtifactStates(
       sourceHash,
       installedHash,
       exposurePlan,
+      exposures,
       status,
       managedEntry
     };

@@ -2,6 +2,9 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { collectArtifactStates } from "../src/install.js";
+import { buildScanJson } from "../src/json-report.js";
+import { resolveTargetPaths } from "../src/paths.js";
 import { scanSourceRepository } from "../src/source.js";
 
 const tempDirs: string[] = [];
@@ -99,5 +102,60 @@ describe("scanSourceRepository", () => {
     await fs.writeFile(path.join(repo, "skills", "deprecated", "review", "SKILL.md"), "# Old Review\n", "utf8");
 
     await expect(scanSourceRepository(repo)).rejects.toThrow('Duplicate skill name "review"');
+  });
+});
+
+describe("scan reporting pipeline", () => {
+  async function makeHome(): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-installer-scan-home-"));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  async function writeConfig(home: string, yaml: string): Promise<void> {
+    const paths = resolveTargetPaths(home);
+    await fs.mkdir(paths.stateDir, { recursive: true });
+    await fs.writeFile(paths.configFile, yaml, "utf8");
+  }
+
+  it("maps discovered artifacts to one exposures[] entry per target that declares their kind", async () => {
+    const repo = await makeRepo();
+    await fs.mkdir(path.join(repo, "skills", "review"), { recursive: true });
+    await fs.writeFile(path.join(repo, "skills", "review", "SKILL.md"), "# Review\n", "utf8");
+    await fs.mkdir(path.join(repo, "prompts"), { recursive: true });
+    await fs.writeFile(path.join(repo, "prompts", "commit-message.md"), "write a commit\n", "utf8");
+    const home = await makeHome();
+    const claudeSkills = path.join(home, "claude-skills");
+    const claudePrompts = path.join(home, "claude-prompts");
+    const teamSkills = path.join(home, "team-skills");
+    await writeConfig(
+      home,
+      `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n    prompts: ${claudePrompts}\n  team:\n    skills: ${teamSkills}\n`
+    );
+
+    const artifacts = await scanSourceRepository(repo);
+    const { states } = await collectArtifactStates(artifacts, home);
+
+    const review = states.find((state) => state.id === "skill:review");
+    expect(review?.exposures.map((exposure) => exposure.targetName).sort()).toEqual(["claude", "team"]);
+    const prompt = states.find((state) => state.id === "prompt:commit-message");
+    expect(prompt?.exposures.map((exposure) => exposure.targetName)).toEqual(["claude"]);
+  });
+
+  it("scan JSON carries schemaVersion 2 with exposures[] and no exposurePath", async () => {
+    const repo = await makeRepo();
+    await fs.mkdir(path.join(repo, "skills", "review"), { recursive: true });
+    await fs.writeFile(path.join(repo, "skills", "review", "SKILL.md"), "# Review\n", "utf8");
+    const home = await makeHome();
+
+    const artifacts = await scanSourceRepository(repo);
+    const { states, removed } = await collectArtifactStates(artifacts, home);
+    const output = buildScanJson(states, removed);
+
+    expect(output.schemaVersion).toBe(2);
+    expect(output.artifacts).toHaveLength(1);
+    expect(output.artifacts[0]).not.toHaveProperty("exposurePath");
+    expect(output.artifacts[0]?.exposures).toEqual([]);
+    expect(output).not.toHaveProperty("notices");
   });
 });

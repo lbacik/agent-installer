@@ -68,7 +68,7 @@ describe("scan --json", () => {
 
     expect(result.exitCode).toBe(0);
     const parsed = parseStdoutJson(result.stdout) as { schemaVersion: number; artifacts: Array<Record<string, unknown>> };
-    expect(parsed.schemaVersion).toBe(1);
+    expect(parsed.schemaVersion).toBe(2);
     expect(parsed.artifacts.map((artifact) => artifact.id).sort()).toEqual(["prompt:commit-message", "skill:review"]);
     expect(parsed.artifacts.every((artifact) => artifact.status === "new")).toBe(true);
   });
@@ -216,7 +216,7 @@ describe("list --json", () => {
 
     expect(result.exitCode).toBe(0);
     const parsed = parseStdoutJson(result.stdout) as { schemaVersion: number; artifacts: unknown[] };
-    expect(parsed).toEqual({ schemaVersion: 1, artifacts: [] });
+    expect(parsed).toEqual({ schemaVersion: 2, artifacts: [] });
   });
 
   it("lists managed entries non-interactively with no TTY attached", async () => {
@@ -240,9 +240,224 @@ describe("list --json", () => {
     const result = await runCli(["list", "--json"], home);
 
     expect(result.exitCode).toBe(0);
-    const parsed = parseStdoutJson(result.stdout) as { artifacts: Array<{ id: string; status: string; exposurePath: unknown }> };
+    const parsed = parseStdoutJson(result.stdout) as {
+      schemaVersion: number;
+      artifacts: Array<{ id: string; status: string; exposures: unknown[] }>;
+    };
+    expect(parsed.schemaVersion).toBe(2);
     const review = parsed.artifacts.find((artifact) => artifact.id === "skill:review");
     expect(review?.status).toBe("installed-same");
-    expect(review?.exposurePath).toBeNull();
+    expect(review?.exposures).toEqual([]);
+    expect(review).not.toHaveProperty("exposurePath");
+  });
+});
+
+describe("JSON report v2 exposures", () => {
+  async function writeConfig(home: string, yaml: string): Promise<void> {
+    const dir = path.join(home, ".agents", "agent-installer");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "config.yaml"), yaml, "utf8");
+  }
+
+  async function addLegacyExposure(home: string): Promise<string> {
+    const legacyDir = path.join(home, ".claude", "skills");
+    await fs.mkdir(legacyDir, { recursive: true });
+    const legacyPath = path.join(legacyDir, "review");
+    await fs.symlink(path.join(home, ".agents", "skills", "review"), legacyPath);
+
+    const statePath = path.join(home, ".agents", "agent-installer", "state.json");
+    const state = JSON.parse(await fs.readFile(statePath, "utf8")) as {
+      entries: Array<{ id: string; exposures: Array<{ path: string; targetName: string | null }> }>;
+    };
+    for (const entry of state.entries) {
+      if (entry.id === "skill:review") {
+        entry.exposures = [{ path: legacyPath, targetName: null }];
+      }
+    }
+    await fs.writeFile(statePath, JSON.stringify(state), "utf8");
+    return legacyPath;
+  }
+
+  it("scan --json carries one exposures[] entry per configured target after install", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    const skillsDir = path.join(home, "claude-skills");
+    const promptsDir = path.join(home, "claude-prompts");
+    await writeConfig(home, `version: 1\ntargets:\n  claude:\n    skills: ${skillsDir}\n    prompts: ${promptsDir}\n`);
+    await runCli(["install", repo, "--all"], home);
+
+    const result = await runCli(["scan", repo, "--json"], home);
+
+    expect(result.exitCode).toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as {
+      schemaVersion: number;
+      artifacts: Array<{ id: string; status: string; exposures: Array<{ targetName: string; status: string }> }>;
+    };
+    expect(parsed.schemaVersion).toBe(2);
+    const review = parsed.artifacts.find((artifact) => artifact.id === "skill:review");
+    expect(review?.status).toBe("installed-same");
+    expect(review?.exposures).toEqual([{ targetName: "claude", path: path.join(skillsDir, "review"), status: "installed-same" }]);
+    const prompt = parsed.artifacts.find((artifact) => artifact.id === "prompt:commit-message");
+    expect(prompt?.exposures).toEqual([
+      { targetName: "claude", path: path.join(promptsDir, "commit-message.md"), status: "installed-same" }
+    ]);
+  });
+
+  it("install --json emits schemaVersion 2 with exposures[] in place of exposurePath", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+
+    const result = await runCli(["install", repo, "--all", "--json"], home);
+
+    expect(result.exitCode).toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as {
+      schemaVersion: number;
+      installed: Array<{ id: string; exposures: unknown[] } & Record<string, unknown>>;
+    };
+    expect(parsed.schemaVersion).toBe(2);
+    expect(parsed.installed.map((entry) => entry.id).sort()).toEqual(["prompt:commit-message", "skill:review"]);
+    for (const entry of parsed.installed) {
+      expect(entry).not.toHaveProperty("exposurePath");
+      expect(entry.exposures).toEqual([]);
+    }
+  });
+
+  it("scan --json surfaces a legacy notice pointing at config init", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    await runCli(["install", repo, "--all"], home);
+    const legacyPath = await addLegacyExposure(home);
+
+    const result = await runCli(["scan", repo, "--json"], home);
+
+    expect(result.exitCode).toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as {
+      artifacts: Array<{ id: string; exposures: Array<{ targetName: string | null }> }>;
+      notices?: string[];
+    };
+    const review = parsed.artifacts.find((artifact) => artifact.id === "skill:review");
+    expect(review?.exposures).toEqual([{ targetName: null, path: legacyPath, status: "installed-same" }]);
+    expect(parsed.notices?.join("\n")).toMatch(/config init/);
+    expect(parsed.notices?.join("\n")).toMatch(/skill:review/);
+  });
+
+  it("scan human-readable output surfaces the same legacy notice", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    await runCli(["install", repo, "--all"], home);
+    await addLegacyExposure(home);
+
+    const result = await runCli(["scan", repo], home);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/config init/);
+    expect(result.stdout).toMatch(/skill:review/);
+  });
+
+  it("list --json surfaces the same legacy notice", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    await runCli(["install", repo, "--all"], home);
+    await addLegacyExposure(home);
+
+    const result = await runCli(["list", "--json"], home);
+
+    expect(result.exitCode).toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as { notices?: string[] };
+    expect(parsed.notices?.join("\n")).toMatch(/config init/);
+  });
+});
+
+describe("sync --json", () => {
+  async function writeConfig(home: string, yaml: string): Promise<void> {
+    const dir = path.join(home, ".agents", "agent-installer");
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, "config.yaml"), yaml, "utf8");
+  }
+
+  it("reports planned and applied creates with schemaVersion 2", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    await runCli(["install", repo, "--all"], home);
+
+    const skillsDir = path.join(home, "claude-skills");
+    const promptsDir = path.join(home, "claude-prompts");
+    await writeConfig(home, `version: 1\ntargets:\n  claude:\n    skills: ${skillsDir}\n    prompts: ${promptsDir}\n`);
+
+    const result = await runCli(["sync", "--json"], home);
+
+    expect(result.exitCode).toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as {
+      schemaVersion: number;
+      planned: Array<{ id: string; action: string }>;
+      applied: Array<{ id: string; action: string }>;
+      skipped: unknown[];
+    };
+    expect(parsed.schemaVersion).toBe(2);
+    expect(parsed.planned).toEqual(parsed.applied);
+    expect(parsed.planned.map((action) => action.id).sort()).toEqual(["prompt:commit-message", "skill:review"]);
+    expect(parsed.planned.every((action) => action.action === "create")).toBe(true);
+    expect(parsed.skipped).toEqual([]);
+  });
+
+  it("reports an empty applied list under --dry-run", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    await runCli(["install", repo, "--all"], home);
+
+    const skillsDir = path.join(home, "claude-skills");
+    await writeConfig(home, `version: 1\ntargets:\n  claude:\n    skills: ${skillsDir}\n`);
+
+    const result = await runCli(["sync", "--dry-run", "--json"], home);
+
+    expect(result.exitCode).toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as {
+      planned: Array<{ id: string }>;
+      applied: unknown[];
+    };
+    expect(parsed.planned.map((action) => action.id)).toEqual(["skill:review"]);
+    expect(parsed.applied).toEqual([]);
+    await expect(fs.access(path.join(skillsDir, "review"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("reports a conflict abort as a parseable error naming every conflicting pair", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    await runCli(["install", repo, "--all"], home);
+
+    const skillsDir = path.join(home, "claude-skills");
+    const promptsDir = path.join(home, "claude-prompts");
+    await writeConfig(home, `version: 1\ntargets:\n  claude:\n    skills: ${skillsDir}\n    prompts: ${promptsDir}\n`);
+    await fs.mkdir(skillsDir, { recursive: true });
+    await fs.writeFile(path.join(skillsDir, "review"), "user-owned\n", "utf8");
+
+    const refused = await runCli(["sync", "--json"], home);
+
+    expect(refused.exitCode).not.toBe(0);
+    const refusedParsed = parseStdoutJson(refused.stdout) as {
+      planned: unknown[];
+      applied: unknown[];
+      skipped: Array<{ id: string; targetName: string }>;
+      error?: string;
+    };
+    expect(refusedParsed.planned).toEqual([]);
+    expect(refusedParsed.applied).toEqual([]);
+    expect(refusedParsed.skipped).toEqual([
+      expect.objectContaining({ id: "skill:review", targetName: "claude" })
+    ]);
+    expect(refusedParsed.error).toMatch(/skill:review/);
+
+    const allowed = await runCli(["sync", "--allow-conflicts", "--json"], home);
+
+    expect(allowed.exitCode).toBe(0);
+    const allowedParsed = parseStdoutJson(allowed.stdout) as {
+      planned: Array<{ id: string; action: string }>;
+      skipped: Array<{ id: string }>;
+    };
+    expect(allowedParsed.planned.map((action) => action.id)).toEqual(["prompt:commit-message"]);
+    expect(allowedParsed.skipped.map((entry) => entry.id)).toEqual(["skill:review"]);
+    expect(await fs.readlink(path.join(promptsDir, "commit-message.md"))).toBe(
+      path.join(home, ".agents", "prompts", "commit-message.md")
+    );
   });
 });

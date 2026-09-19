@@ -2,7 +2,9 @@ import pc from "picocolors";
 import path from "node:path";
 import {
   ArtifactState,
+  ArtifactStatus,
   ExposureConflictSummary,
+  ExposureState,
   ManagedEntry,
   RemovedArtifactState,
   SkippedExposureRemoval,
@@ -33,7 +35,60 @@ export function formatArtifactLine(state: ArtifactState): string {
         ? " (update available)"
         : "";
 
-  return `${colorizeStatus(state.status)} ${state.id} <- ${state.artifact.relativeSourcePath}${detail}`;
+  return `${colorizeStatus(state.status)} ${state.id} <- ${state.artifact.relativeSourcePath}${detail}${exposureBreakdownSuffix(state.status, state.exposures)}`;
+}
+
+// Points a legacy (`targetName: null`) exposure at `config init`, which can adopt
+// it into a named target. Shared by human-readable lines and JSON `notices[]`.
+export function buildLegacyExposureNotice(id: string, exposurePath: string): string {
+  return `notice ${id} has a legacy exposure at ${exposurePath} (run \`agent-installer config init\` to adopt it into a named target)`;
+}
+
+// Collects one notice per owned legacy exposure across scanned states and managed
+// entries (pass `removed.map((entry) => entry.managedEntry)` for the latter).
+export function collectLegacyNotices(
+  entries: Array<{ id: string; exposures: Array<{ targetName: string | null; path: string }> }>
+): string[] {
+  return entries.flatMap((entry) =>
+    entry.exposures
+      .filter((exposure) => exposure.targetName === null)
+      .map((exposure) => buildLegacyExposureNotice(entry.id, exposure.path))
+  );
+}
+
+function shortExposureStatus(status: ArtifactStatus): string {
+  switch (status) {
+    case "new":
+      return "new";
+    case "installed-same":
+      return "same";
+    case "installed-different":
+      return "different";
+    case "conflict":
+      return "conflict";
+    case "source-missing":
+      return "missing";
+  }
+}
+
+export function formatExposureBreakdown(exposures: ExposureState[]): string {
+  const parts = exposures.map((exposure) => `${exposure.targetName ?? "legacy"}: ${shortExposureStatus(exposure.status)}`);
+  return `[${parts.join(", ")}]`;
+}
+
+// Bracketed per-target breakdown, appended to the one-line artifact format. Empty
+// (line unchanged) when zero or one exposure agrees with the aggregate status;
+// otherwise every exposure is listed, e.g. `[claude: same, vscode: new]`.
+export function exposureBreakdownSuffix(aggregate: ArtifactStatus, exposures: ExposureState[]): string {
+  if (exposures.length === 0) {
+    return "";
+  }
+
+  if (exposures.length === 1 && exposures[0]?.status === aggregate) {
+    return "";
+  }
+
+  return ` ${formatExposureBreakdown(exposures)}`;
 }
 
 export function formatInteractiveStartupArtifactLines(states: ArtifactState[]): string[] {
@@ -65,13 +120,15 @@ function formatProvenance(entry: ManagedEntry): string | undefined {
   return parts.length === 0 ? undefined : `(${parts.join(" ")})`;
 }
 
-export function formatManagedEntryLines(entries: ManagedEntry[]): string[] {
+export function formatManagedEntryLines(entries: ManagedEntry[], breakdowns?: Map<string, ExposureState[]>): string[] {
   const idWidth = Math.max(...entries.map((entry) => entry.id.length));
 
   return entries.map((entry) => {
     const line = `${entry.id.padEnd(idWidth)}  ${formatSourcePath(entry.sourceRoot, entry.relativeSourcePath)}`;
     const provenance = formatProvenance(entry);
-    return provenance === undefined ? line : `${line}  ${provenance}`;
+    const withProvenance = provenance === undefined ? line : `${line}  ${provenance}`;
+    const exposures = breakdowns?.get(entry.id) ?? [];
+    return exposures.length > 1 ? `${withProvenance}  ${formatExposureBreakdown(exposures)}` : withProvenance;
   });
 }
 

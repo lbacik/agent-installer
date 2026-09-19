@@ -33,6 +33,25 @@ export interface ExposureRecord {
 }
 
 /**
+ * The reportable state of one (target, kind) exposure for an artifact. One entry
+ * exists per desired (target, kind) pair from the current `config.yaml`, plus one
+ * per legacy (`targetName: null`) exposure the installer still owns. `status` is
+ * per-exposure: `"new"` means the path does not exist yet and can be created,
+ * `"installed-same"`/`"installed-different"` mirror the link-plus-content check,
+ * and `"conflict"` means the path exists but is not a symlink to the artifact's
+ * `basePath`. A single-exposure conflict never sets the artifact-level aggregate
+ * `status` to `"conflict"`; only a `basePath` conflict does that.
+ */
+export interface ExposureState {
+  targetName: string | null;
+  path: string;
+  status: ArtifactStatus;
+  conflictReason?: string;
+  /** Equals `path` when status is `"conflict"`. */
+  conflictPath?: string;
+}
+
+/**
  * The reconciled state of one desired (artifact, target) exposure, derived from the
  * current `config.yaml` targets that declare the artifact's kind. `"new"` means the
  * path does not exist yet and can be created; `"match"` means an owned symlink is
@@ -94,6 +113,19 @@ export interface ArtifactState {
   installedHash: string | null;
   status: ArtifactStatus;
   managedEntry: ManagedEntry | null;
+  /**
+   * One entry per desired (target, kind) pair from the current `config.yaml`,
+   * plus one per legacy (`targetName: null`) exposure the installer still owns.
+   * Empty when `config.yaml` declares no target for this artifact's kind (and no
+   * legacy exposure is owned), or when `status` is `"conflict"` (a basePath
+   * conflict blocks the whole artifact, so its exposures are never evaluated).
+   * Artifact-level `status` is the aggregate: `"conflict"` only for a basePath
+   * conflict, `"installed-same"` only when content matches and every desired
+   * exposure matches, `"installed-different"` otherwise, `"new"` when nothing
+   * exists yet. `conflictReason`/`conflictPath` stay reserved for basePath
+   * conflicts; per-exposure conflicts live in this array only.
+   */
+  exposures: ExposureState[];
   conflictReason?: string;
   /** The specific filesystem path (currently always basePath) that a "conflict" status refers to. */
   conflictPath?: string;

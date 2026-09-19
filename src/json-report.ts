@@ -1,7 +1,19 @@
-import { readSymlinkTarget } from "./install.js";
-import type { ArtifactState, ArtifactStatus, ExposureRecord, ManagedEntry, RemovedArtifactState } from "./types.js";
+import { buildExposurePlan, planEntryToExposureState, readSymlinkTarget } from "./install.js";
+import { buildLegacyExposureNotice } from "./format.js";
+import { resolveHome } from "./paths.js";
+import type { AgentInstallerConfig } from "./config.js";
+import type { SyncAction, SyncResult } from "./sync.js";
+import type {
+  ArtifactState,
+  ArtifactStatus,
+  ExposureKind,
+  ExposureRecord,
+  ExposureState,
+  ManagedEntry,
+  RemovedArtifactState
+} from "./types.js";
 
-export const JSON_SCHEMA_VERSION = 1 as const;
+export const JSON_SCHEMA_VERSION = 2 as const;
 
 export interface JsonArtifactRecord {
   id: string;
@@ -11,16 +23,13 @@ export interface JsonArtifactRecord {
   sourceIdentity: string;
   relativeSourcePath: string;
   basePath: string;
-  /**
-   * The first owned exposure's path, or `null` when the artifact has none (the
-   * common case until a configuration module exists). Superseded by a full
-   * `exposures[]` array in a later schema version.
-   */
-  exposurePath: string | null;
+  /** One entry per desired (target, kind) pair, plus one per owned legacy exposure. Replaces v1's singular `exposurePath`. */
+  exposures: ExposureState[];
   sourceHash: string;
   installedHash: string | null;
   requestedRef?: string;
   resolvedCommit?: string;
+  /** Reserved for basePath conflicts only; per-exposure conflicts live in `exposures[]`. */
   conflictReason?: string;
   conflictPath?: string;
 }
@@ -28,6 +37,7 @@ export interface JsonArtifactRecord {
 export interface ScanJsonOutput {
   schemaVersion: typeof JSON_SCHEMA_VERSION;
   artifacts: JsonArtifactRecord[];
+  notices?: string[];
   error?: string;
 }
 
@@ -40,6 +50,32 @@ export interface InstallJsonOutput {
   skipped: JsonArtifactRecord[];
   refused: JsonArtifactRecord[];
   pruned: JsonArtifactRecord[];
+  notices?: string[];
+  error?: string;
+}
+
+export interface JsonSyncAction {
+  id: string;
+  targetName: string;
+  kind: ExposureKind;
+  path: string;
+  action: "create" | "remove" | "move";
+  fromPath?: string;
+}
+
+export interface JsonSyncSkipped {
+  id: string;
+  targetName: string;
+  path: string;
+  conflictReason: string;
+}
+
+export interface SyncJsonOutput {
+  schemaVersion: typeof JSON_SCHEMA_VERSION;
+  planned: JsonSyncAction[];
+  applied: JsonSyncAction[];
+  skipped: JsonSyncSkipped[];
+  notices?: string[];
   error?: string;
 }
 
@@ -53,8 +89,20 @@ function provenanceFields(source: { requestedRef?: string | undefined; resolvedC
   };
 }
 
-function firstExposurePath(exposures: ExposureRecord[]): string | null {
-  return exposures[0]?.path ?? null;
+function withNotices<T extends object>(output: T, notices: string[]): T & { notices?: string[] } {
+  return notices.length === 0 ? output : { ...output, notices };
+}
+
+function legacyNoticesForExposures(id: string, exposures: ExposureState[]): string[] {
+  return exposures
+    .filter((exposure) => exposure.targetName === null)
+    .map((exposure) => buildLegacyExposureNotice(id, exposure.path));
+}
+
+function legacyNoticesForRecords(id: string, exposures: ExposureRecord[]): string[] {
+  return exposures
+    .filter((exposure) => exposure.targetName === null)
+    .map((exposure) => buildLegacyExposureNotice(id, exposure.path));
 }
 
 export function artifactStateToJson(state: ArtifactState): JsonArtifactRecord {
@@ -66,7 +114,7 @@ export function artifactStateToJson(state: ArtifactState): JsonArtifactRecord {
     sourceIdentity: state.artifact.sourceRoot,
     relativeSourcePath: state.artifact.relativeSourcePath,
     basePath: state.basePath,
-    exposurePath: state.managedEntry === null ? null : firstExposurePath(state.managedEntry.exposures),
+    exposures: state.exposures,
     sourceHash: state.sourceHash,
     installedHash: state.installedHash,
     ...provenanceFields(state.artifact),
@@ -85,7 +133,11 @@ export function removedArtifactStateToJson(state: RemovedArtifactState): JsonArt
     sourceIdentity: entry.sourceRoot,
     relativeSourcePath: entry.relativeSourcePath,
     basePath: state.basePath,
-    exposurePath: firstExposurePath(entry.exposures),
+    exposures: entry.exposures.map((exposure) => ({
+      targetName: exposure.targetName,
+      path: exposure.path,
+      status: "source-missing" as ArtifactStatus
+    })),
     sourceHash: entry.sourceHash,
     installedHash: entry.installedHash,
     ...provenanceFields(entry)
@@ -94,25 +146,76 @@ export function removedArtifactStateToJson(state: RemovedArtifactState): JsonArt
 
 // `list` never re-scans the original source, so content drift can only be judged
 // against the installer's own recorded hashes, not against the source repository's
-// current content. Owned exposure symlinks, however, are local state `list` can check
-// directly, so a broken or missing exposure still reconciles as installed-different
-// here rather than being reported as installed-same. An entry with no owned exposures
-// (the common case until a configuration module exists) has nothing to check here.
-export async function managedEntryToJson(entry: ManagedEntry): Promise<JsonArtifactRecord> {
+// current content. With a config, a desired-but-missing exposure also counts as
+// drift (mirroring scan); without one, only the owned recorded links are checked.
+// Legacy exposures never affect the aggregate status; they only surface notices.
+export async function managedEntryToJson(
+  entry: ManagedEntry,
+  config?: AgentInstallerConfig | null,
+  home?: string
+): Promise<JsonArtifactRecord> {
   const contentMatches = entry.sourceHash === entry.installedHash;
-  const exposureMatches = (
-    await Promise.all(entry.exposures.map(async (exposure) => (await readSymlinkTarget(exposure.path)) === entry.basePath))
-  ).every(Boolean);
+
+  if (config === undefined || config === null) {
+    const checks = await Promise.all(
+      entry.exposures.map(async (exposure) => ({
+        exposure,
+        owned: (await readSymlinkTarget(exposure.path)) === entry.basePath
+      }))
+    );
+    const exposureMatches = checks.every((check) => check.owned);
+
+    return {
+      id: entry.id,
+      kind: entry.kind,
+      name: entry.name,
+      status: contentMatches && exposureMatches ? "installed-same" : "installed-different",
+      sourceIdentity: entry.sourceRoot,
+      relativeSourcePath: entry.relativeSourcePath,
+      basePath: entry.basePath,
+      exposures: checks.map(({ exposure, owned }) => ({
+        targetName: exposure.targetName,
+        path: exposure.path,
+        status: owned
+          ? contentMatches
+            ? ("installed-same" as ArtifactStatus)
+            : ("installed-different" as ArtifactStatus)
+          : ("installed-different" as ArtifactStatus)
+      })),
+      sourceHash: entry.sourceHash,
+      installedHash: entry.installedHash,
+      ...provenanceFields(entry)
+    };
+  }
+
+  const desiredPlan = await buildExposurePlan(config, resolveHome(home), { kind: entry.kind, name: entry.name }, entry.basePath);
+  const exposures: ExposureState[] = desiredPlan.map((plan) => planEntryToExposureState(plan, contentMatches));
+
+  const plannedPaths = new Set(desiredPlan.map((plan) => plan.path));
+  for (const record of entry.exposures) {
+    if (record.targetName !== null || plannedPaths.has(record.path)) {
+      continue;
+    }
+
+    const owned = (await readSymlinkTarget(record.path)) === entry.basePath;
+    exposures.push({
+      targetName: null,
+      path: record.path,
+      status: owned
+        ? ((contentMatches ? "installed-same" : "installed-different") as ArtifactStatus)
+        : ("installed-different" as ArtifactStatus)
+    });
+  }
 
   return {
     id: entry.id,
     kind: entry.kind,
     name: entry.name,
-    status: contentMatches && exposureMatches ? "installed-same" : "installed-different",
+    status: contentMatches && desiredPlan.every((plan) => plan.status === "match") ? "installed-same" : "installed-different",
     sourceIdentity: entry.sourceRoot,
     relativeSourcePath: entry.relativeSourcePath,
     basePath: entry.basePath,
-    exposurePath: firstExposurePath(entry.exposures),
+    exposures,
     sourceHash: entry.sourceHash,
     installedHash: entry.installedHash,
     ...provenanceFields(entry)
@@ -120,17 +223,29 @@ export async function managedEntryToJson(entry: ManagedEntry): Promise<JsonArtif
 }
 
 export function buildScanJson(states: ArtifactState[], removed: RemovedArtifactState[]): ScanJsonOutput {
-  return {
-    schemaVersion: JSON_SCHEMA_VERSION,
-    artifacts: [...states.map(artifactStateToJson), ...removed.map(removedArtifactStateToJson)]
-  };
+  const notices = [
+    ...states.flatMap((state) => legacyNoticesForExposures(state.id, state.exposures)),
+    ...removed.flatMap((state) => legacyNoticesForRecords(state.id, state.managedEntry.exposures))
+  ];
+
+  return withNotices(
+    {
+      schemaVersion: JSON_SCHEMA_VERSION,
+      artifacts: [...states.map(artifactStateToJson), ...removed.map(removedArtifactStateToJson)]
+    },
+    notices
+  );
 }
 
-export async function buildListJson(entries: ManagedEntry[]): Promise<ListJsonOutput> {
-  return {
-    schemaVersion: JSON_SCHEMA_VERSION,
-    artifacts: await Promise.all(entries.map(managedEntryToJson))
-  };
+export async function buildListJson(
+  entries: ManagedEntry[],
+  config?: AgentInstallerConfig | null,
+  home?: string
+): Promise<ListJsonOutput> {
+  const artifacts = await Promise.all(entries.map((entry) => managedEntryToJson(entry, config, home)));
+  const notices = artifacts.flatMap((artifact) => legacyNoticesForExposures(artifact.id, artifact.exposures));
+
+  return withNotices({ schemaVersion: JSON_SCHEMA_VERSION, artifacts }, notices);
 }
 
 export function buildArtifactsErrorJson(error: unknown): ScanJsonOutput {
@@ -156,14 +271,19 @@ export async function buildInstallSuccessJson(
     }
   }
 
-  return {
-    schemaVersion: JSON_SCHEMA_VERSION,
-    installed: installedRecords,
-    updated: updatedRecords,
-    skipped: conflicts.map(artifactStateToJson),
-    refused: [],
-    pruned: pruned.map(removedArtifactStateToJson)
-  };
+  const notices = states.flatMap((state) => legacyNoticesForExposures(state.id, state.exposures));
+
+  return withNotices(
+    {
+      schemaVersion: JSON_SCHEMA_VERSION,
+      installed: installedRecords,
+      updated: updatedRecords,
+      skipped: conflicts.map(artifactStateToJson),
+      refused: [],
+      pruned: pruned.map(removedArtifactStateToJson)
+    },
+    notices
+  );
 }
 
 export function buildInstallErrorJson(error: unknown, refused: ArtifactState[] = []): InstallJsonOutput {
@@ -174,6 +294,72 @@ export function buildInstallErrorJson(error: unknown, refused: ArtifactState[] =
     skipped: [],
     refused: refused.map(artifactStateToJson),
     pruned: [],
+    error: messageOf(error)
+  };
+}
+
+export function syncConflictToSkipped(action: SyncAction): JsonSyncSkipped {
+  return {
+    id: action.id,
+    targetName: action.targetName,
+    path: action.path,
+    conflictReason: action.reason ?? "conflict"
+  };
+}
+
+export function buildSyncJson(result: SyncResult): SyncJsonOutput {
+  const planned: JsonSyncAction[] = [];
+  const skipped: JsonSyncSkipped[] = [];
+
+  for (const action of result.actions) {
+    if (action.action === "create") {
+      planned.push({ id: action.id, targetName: action.targetName, kind: action.kind, path: action.path, action: "create" });
+    } else if (action.action === "move" && action.previousPath !== undefined) {
+      planned.push({
+        id: action.id,
+        targetName: action.targetName,
+        kind: action.kind,
+        path: action.path,
+        action: "move",
+        fromPath: action.previousPath
+      });
+    } else if (action.action === "remove-orphan") {
+      planned.push({ id: action.id, targetName: action.targetName, kind: action.kind, path: action.path, action: "remove" });
+    } else if (action.action === "conflict") {
+      skipped.push(syncConflictToSkipped(action));
+    }
+  }
+
+  for (const removal of result.skippedOrphanRemovals) {
+    skipped.push({
+      id: removal.id,
+      targetName: removal.targetName ?? "legacy",
+      path: removal.path,
+      conflictReason: "Exposure path is no longer an owned symlink, so it was left alone."
+    });
+  }
+
+  const notices = result.legacyNotices.map(
+    (notice) => `notice ${notice.id} has a legacy exposure at ${notice.path} (never touched by sync)`
+  );
+
+  return withNotices(
+    {
+      schemaVersion: JSON_SCHEMA_VERSION,
+      planned,
+      applied: result.dryRun ? [] : planned,
+      skipped
+    },
+    notices
+  );
+}
+
+export function buildSyncErrorJson(error: unknown, skipped: JsonSyncSkipped[] = []): SyncJsonOutput {
+  return {
+    schemaVersion: JSON_SCHEMA_VERSION,
+    planned: [],
+    applied: [],
+    skipped,
     error: messageOf(error)
   };
 }
