@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { collectLegacyNotices } from "../src/format.js";
 import { hashArtifact } from "../src/hash.js";
 import { collectArtifactStates, installAllFromSource, installArtifacts, removeArtifacts } from "../src/install.js";
 import { resolveTargetPaths } from "../src/paths.js";
@@ -542,6 +543,125 @@ describe("artifact status reconciliation", () => {
 
     expect(await statusOf(repo, home, "skill:review")).toBe("new");
     expect(await statusOf(repo, home, "prompt:commit-message")).toBe("new");
+  });
+});
+
+describe("exposure state reporting", () => {
+  it("reports empty exposures with no config on a fresh scan", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+
+    const artifacts = await scanSourceRepository(repo);
+    const { states } = await collectArtifactStates(artifacts, home);
+
+    expect(states).toHaveLength(2);
+    for (const state of states) {
+      expect(state.status).toBe("new");
+      expect(state.exposures).toEqual([]);
+    }
+  });
+
+  it("reports new exposures for a fresh artifact when a target is configured", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    const claudeSkills = path.join(home, "claude-skills");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n`);
+
+    const artifacts = await scanSourceRepository(repo);
+    const { states } = await collectArtifactStates(artifacts, home);
+
+    const review = states.find((state) => state.id === "skill:review");
+    expect(review?.status).toBe("new");
+    expect(review?.exposures).toEqual([{ targetName: "claude", path: path.join(claudeSkills, "review"), status: "new" }]);
+    const prompt = states.find((state) => state.id === "prompt:commit-message");
+    expect(prompt?.exposures).toEqual([]);
+  });
+
+  it("reports one same exposure after a single-target install", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    const claudeSkills = path.join(home, "claude-skills");
+    const claudePrompts = path.join(home, "claude-prompts");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n    prompts: ${claudePrompts}\n`);
+    await installAllFromSource(repo, home);
+
+    const artifacts = await scanSourceRepository(repo);
+    const { states } = await collectArtifactStates(artifacts, home);
+
+    const review = states.find((state) => state.id === "skill:review");
+    expect(review?.status).toBe("installed-same");
+    expect(review?.exposures).toEqual([
+      { targetName: "claude", path: path.join(claudeSkills, "review"), status: "installed-same" }
+    ]);
+  });
+
+  it("bumps to installed-different when a configured exposure goes missing", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    const claudeSkills = path.join(home, "claude-skills");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n`);
+    await installAllFromSource(repo, home);
+    await fs.rm(path.join(claudeSkills, "review"));
+
+    const artifacts = await scanSourceRepository(repo);
+    const { states } = await collectArtifactStates(artifacts, home);
+
+    const review = states.find((state) => state.id === "skill:review");
+    expect(review?.status).toBe("installed-different");
+    expect(review?.sourceHash).toBe(review?.installedHash);
+    expect(review?.exposures).toEqual([{ targetName: "claude", path: path.join(claudeSkills, "review"), status: "new" }]);
+  });
+
+  it("keeps the aggregate out of conflict for a single-exposure conflict", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    const claudeSkills = path.join(home, "claude-skills");
+    const teamSkills = path.join(home, "team-skills");
+    await writeConfigYaml(
+      paths,
+      `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n  team:\n    skills: ${teamSkills}\n`
+    );
+    await installAllFromSource(repo, home);
+
+    const claudeExposure = path.join(claudeSkills, "review");
+    await fs.rm(claudeExposure);
+    await fs.writeFile(claudeExposure, "user-owned\n", "utf8");
+
+    const artifacts = await scanSourceRepository(repo);
+    const { states } = await collectArtifactStates(artifacts, home);
+
+    const review = states.find((state) => state.id === "skill:review");
+    expect(review?.status).toBe("installed-different");
+    expect(review?.conflictReason).toBeUndefined();
+    expect(review?.exposures).toEqual([
+      {
+        targetName: "claude",
+        path: claudeExposure,
+        status: "conflict",
+        conflictReason: expect.stringContaining("claude"),
+        conflictPath: claudeExposure
+      },
+      { targetName: "team", path: path.join(teamSkills, "review"), status: "installed-same" }
+    ]);
+  });
+
+  it("reports a legacy exposure alongside a notice without changing the aggregate", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const { exposurePath } = await installWithLegacyExposure(repo, home);
+
+    const artifacts = await scanSourceRepository(repo);
+    const { states } = await collectArtifactStates(artifacts, home);
+
+    const review = states.find((state) => state.id === "skill:review");
+    expect(review?.status).toBe("installed-same");
+    expect(review?.exposures).toEqual([{ targetName: null, path: exposurePath, status: "installed-same" }]);
+    expect(collectLegacyNotices(states)).toEqual([expect.stringContaining("config init")]);
+    expect(collectLegacyNotices(states)[0]).toMatch(/skill:review/);
   });
 });
 
