@@ -25,8 +25,16 @@ The canonical managed copy of installed artifacts under `~/.agents`.
 _Avoid_: cache, mirror
 
 **Tool Exposure**:
-A tool-specific path or symlink that makes a base-store artifact visible to Codex or Claude Code.
+One of zero or more per-artifact symlinks that make a base-store artifact visible at a configured target.
 _Avoid_: duplicate copy
+
+**Target**:
+A named exposure destination declared in `config.yaml` (for example "claude" or "vscode"), mapping an artifact kind to a directory.
+_Avoid_: tool directory
+
+**Owned Exposure**:
+An `ExposureState`/`ExposureRecord` this tool created and is responsible for, as opposed to a merely desired, config-declared one.
+_Avoid_: planned link
 
 **Managed Artifact**:
 An artifact whose installed files and metadata are owned by this CLI and may be updated or removed by it.

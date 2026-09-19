@@ -165,6 +165,10 @@ Or point it at an HTTPS Git repository:
 agent-installer https://github.com/org/agents.git
 ```
 
+### Tool Exposure Is Opt-In
+
+Every `install` writes the canonical copy under `~/.agents`. Nothing is linked into a tool directory until `~/.agents/agent-installer/config.yaml` names that destination as a target (create it with `agent-installer config init`, below). A fresh install with no `config.yaml` produces base-store-only artifacts: `scan` reports no exposures and `install` creates no symlinks.
+
 ### Commands
 
 Interactive install:
@@ -242,7 +246,7 @@ containing exactly what the source declares and nothing else:
 agent-installer install [path] --all --prune
 ```
 
-**`--prune` deletes managed files.** It removes the base-store copy, the Claude exposure symlink, and the state entry
+**`--prune` deletes managed files.** It removes the base-store copy, every recorded exposure symlink, and the state entry
 for every artifact reconciled as `source-missing` for the scanned source. Pruning is opt-in and off by default: a
 skipped artifact is recoverable with a later `install`, a pruned one is not, and scanning a legitimately narrower
 source would otherwise turn a mistyped path into data loss. `--prune` combines with `--only`, pruning only what the
@@ -303,13 +307,28 @@ interactive mode all validate it at startup and abort with an error naming
 the file and the problem if it is malformed. No `config.yaml` means
 base-store-only installation.
 
+Reconcile already-installed artifacts with the current `config.yaml` without
+contacting a source repository. `sync` creates missing exposures, moves
+exposures whose target directory changed, and removes orphaned exposures whose
+target was removed or narrowed to no longer declare that kind. Legacy
+exposures are never modified, only reported:
+
+```bash
+agent-installer sync
+agent-installer sync --only skill:review --target claude
+agent-installer sync --dry-run
+```
+
+Pass `--allow-conflicts` to sync the eligible pairs and skip conflicting ones
+instead of aborting; add `--json` for a machine-readable report.
+
 ### Machine-Readable JSON Output
 
 `scan`, `install`, and `list` accept `--json`. Under `--json`:
 
 - stdout carries exactly one JSON object and nothing else; all human-readable progress, warnings, and errors move to
   stderr.
-- The object always carries `schemaVersion: 1`, so a later shape change cannot break a consumer silently.
+- The object always carries `schemaVersion: 2`, so a later shape change cannot break a consumer silently.
 - Exit statuses are unchanged. A strict-mode abort (an unmanaged conflict without `--allow-conflicts`, or an
   `--only` selector that matches nothing) still exits non-zero, and still prints a JSON object on stdout describing
   the refusal via an `error` string.
@@ -317,14 +336,16 @@ base-store-only installation.
   no TTY attached.
 
 Each artifact entry carries: `id`, `kind`, `name`, `status`, `sourceIdentity`, `relativeSourcePath`, `basePath`,
-`exposurePath`, `sourceHash`, `installedHash`, and, when installed from a remote Git ref, `requestedRef` and
-`resolvedCommit`. A `conflict` entry also carries `conflictReason` and `conflictPath`.
+`exposures[]` (one entry per desired target-kind pair, plus one per owned legacy exposure), `sourceHash`,
+`installedHash`, and, when installed from a remote Git ref, `requestedRef` and `resolvedCommit`. A `conflict`
+entry also carries `conflictReason` and `conflictPath`, which are reserved for base-path conflicts only;
+per-exposure conflicts live in that exposure's `exposures[]` entry.
 
 `scan --json`:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "artifacts": [
     { "id": "skill:review", "kind": "skill", "name": "review", "status": "new", "...": "..." }
   ]
@@ -338,7 +359,7 @@ repository.
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "installed": [],
   "updated": [],
   "skipped": [],
@@ -357,12 +378,12 @@ repository.
 - `pruned`: `source-missing` artifacts removed because `--prune` was passed; always empty without that flag.
 
 `list --json` reports the currently managed entries without re-scanning the source repository, so `status` reflects
-whether the base-store copy still matches what was installed and whether its Claude exposure symlink is intact, not
+whether the base-store copy still matches what was installed and whether its recorded exposure symlinks are intact, not
 whether the upstream source has since changed:
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "artifacts": [
     { "id": "skill:review", "kind": "skill", "name": "review", "status": "installed-same", "...": "..." }
   ]
@@ -401,7 +422,7 @@ USER agent
 ENV HOME=/home/agent
 ```
 
-**The installed tree cannot be relocated after the fact.** Claude exposure symlinks are created with an absolute
+**The installed tree cannot be relocated after the fact.** Exposure symlinks are created with an absolute
 target pointing at the base-store path under the `HOME` used during install. Installing into a staging directory and
 then copying or moving the result into the final image layer produces symlinks that still point at the staging path,
 silently breaking exposure at runtime. Always install directly under the final runtime `HOME`; if a tree must move,
