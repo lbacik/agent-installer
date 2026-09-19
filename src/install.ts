@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { loadConfig } from "./config.js";
 import { formatConflictLine } from "./format.js";
 import { hashArtifact } from "./hash.js";
 import { artifactId, getBasePath, getMarkerPath, resolveTargetPaths, TargetPaths } from "./paths.js";
@@ -142,6 +143,7 @@ export async function collectArtifactStates(
   removed: RemovedArtifactState[];
 }> {
   const paths = resolveTargetPaths(home);
+  await loadConfig(paths, home);
   const state = await loadState(paths);
   const sourceIds = new Set(sourceArtifacts.map((artifact) => artifactId(artifact.kind, artifact.name)));
   const entriesById = new Map(state.entries.map((entry) => [entry.id, entry]));
@@ -237,6 +239,7 @@ export async function installArtifacts(states: ArtifactState[], home?: string): 
 
 export async function removeArtifacts(ids: string[], home?: string): Promise<ManagedEntry[]> {
   const paths = resolveTargetPaths(home);
+  await loadConfig(paths, home);
   const state = await loadState(paths);
   const entries = new Map(state.entries.map((entry) => [entry.id, entry]));
   const removed: ManagedEntry[] = [];
@@ -282,6 +285,9 @@ export async function installAllFromSource(
   installOptions?: InstallAllOptions
 ): Promise<InstallAllResult> {
   const { scanSourceRepository } = await import("./source.js");
+  // Validated before touching the source, so a malformed config.yaml aborts before a
+  // remote source is cloned rather than after paying for the clone.
+  await loadConfig(resolveTargetPaths(home), home);
   const source = await resolveSourceInput(sourcePath, resolveOptions);
 
   try {

@@ -4,3 +4,10 @@ export class SourceConfigurationError extends Error {
     this.name = "SourceConfigurationError";
   }
 }
+
+export class ConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigurationError";
+  }
+}

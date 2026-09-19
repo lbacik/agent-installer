@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
+import { runConfigInit } from "./config-init.js";
+import { loadConfig } from "./config.js";
 import { InstallConflictError, installAllFromSource, installArtifacts, removeArtifacts } from "./install.js";
 import { formatArtifactLine, formatConflictLine, formatOperationLine, formatRemovedLine } from "./format.js";
 import { promptForManagedArtifactRemovals, promptForSelections } from "./interactive.js";
@@ -266,7 +268,9 @@ function createProgram(): Command {
     .action(async (options: { listLength?: number; json?: boolean }) => {
       const json = options.json === true;
       try {
-        const state = await loadState(resolveTargetPaths());
+        const paths = resolveTargetPaths();
+        await loadConfig(paths);
+        const state = await loadState(paths);
 
         if (json) {
           printJson(await buildListJson(state.entries));
@@ -303,6 +307,15 @@ function createProgram(): Command {
         printJson(buildArtifactsErrorJson(error));
         process.exitCode = 1;
       }
+    });
+
+  const configCommand = program.command("config").description("Manage the ~/.agents/agent-installer/config.yaml exposure configuration.");
+  configCommand
+    .command("init")
+    .description("Interactively create config.yaml with one or more exposure targets.")
+    .option("--force", "Overwrite an existing config.yaml without confirmation")
+    .action(async (options: { force?: boolean }) => {
+      await runConfigInit(resolveTargetPaths(), { force: options.force === true });
     });
 
   return program;
