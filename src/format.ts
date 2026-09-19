@@ -1,6 +1,6 @@
 import pc from "picocolors";
 import path from "node:path";
-import { ArtifactState, ManagedEntry, RemovedArtifactState } from "./types.js";
+import { ArtifactState, ExposureConflictSummary, ManagedEntry, RemovedArtifactState, SkippedExposureRemoval } from "./types.js";
 
 function colorizeStatus(status: ArtifactState["status"] | RemovedArtifactState["status"]): string {
   switch (status) {
@@ -73,4 +73,13 @@ export function formatOperationLine(action: "created" | "updated" | "removed", i
 
 export function formatConflictLine(state: ArtifactState): string {
   return `${state.id} -> ${state.conflictPath ?? state.basePath}`;
+}
+
+export function formatExposureConflictLine(conflict: ExposureConflictSummary): string {
+  return `${conflict.id} -> ${conflict.targetName}:${conflict.path} (${conflict.reason})`;
+}
+
+export function formatSkippedExposureLine(skipped: SkippedExposureRemoval): string {
+  const target = skipped.targetName ?? "legacy";
+  return `skipped removing ${skipped.id} exposure for target "${target}" at ${skipped.path} (no longer an owned symlink)`;
 }

@@ -53,10 +53,12 @@ Generated managed content:
 - `~/.agents/skills/<name>/agents/openai.yaml` is materialized when the source `SKILL.md` frontmatter sets the top-level boolean `disable-model-invocation: true`. It carries `policy.allow_implicit_invocation: false` so Codex matches the Claude invocation intent. The source repository is never modified.
 - When such a skill also ships an authored `agents/openai.yaml`, the managed copy retains that file (unrelated keys, sibling `policy` keys, and comments) and only overrides `policy.allow_implicit_invocation`. The file is re-serialized, so formatting may be normalized; an empty `policy:` key is filled in rather than rejected. The Claude setting takes precedence over a conflicting authored policy. Authored metadata that is not a YAML mapping, or whose `policy` is not a mapping, aborts with a source-configuration error before the managed target is created or changed. Skills whose frontmatter does not enable the translation are never validated.
 
-Claude exposure paths:
+Exposure paths, one per `config.yaml` target that declares an artifact's kind:
 
-- `~/.claude/skills/<name>` -> symlink to `~/.agents/skills/<name>`
-- `~/.claude/commands/<name>.md` -> symlink to `~/.agents/prompts/<name>.md`
+- `<target.skills>/<name>` -> symlink to `~/.agents/skills/<name>`
+- `<target.prompts>/<name>.md` -> symlink to `~/.agents/prompts/<name>.md`
+
+`config init`'s "claude" preset prefills `~/.claude/skills` / `~/.claude/commands` for exactly this pattern, but any target name and directory pair works the same way. No `config.yaml` means no exposures are created at all.
 
 State, configuration, and ownership metadata:
 
@@ -120,14 +122,14 @@ Artifacts are reconciled into these states:
 Meaning:
 
 - `new`: not installed yet
-- `installed-same`: managed install matches the source content hash and the Claude exposure symlink is present and points at the managed base path
-- `installed-different`: managed install exists but source content changed, or the Claude exposure symlink is missing; a missing exposure counts as drift, not a match, even when the base-store content is unchanged
+- `installed-same`: managed install matches the source content hash, and every exposure configured for it -- one per `config.yaml` target that declares the artifact's kind -- is present and points at the managed base path
+- `installed-different`: managed install exists but source content changed, or a configured exposure is missing; a missing exposure counts as drift, not a match, even when the base-store content is unchanged
 - `source-missing`: previously managed entry is no longer present in the currently scanned source repository
-- `conflict`: target path exists but is not managed by this tool, or the Claude exposure path exists but is not a symlink to the expected managed base path
+- `conflict`: the base-store target path exists but is not managed by this tool. This blocks the whole artifact. A conflict on a single configured *exposure* (the path exists but is not a symlink to the managed base path) does not set this status -- it blocks only that one (artifact, target) pair, reported separately (see below)
 
 Reconciliation has no status for an unusable source. A skill whose Claude frontmatter enables the Codex invocation-policy translation but whose authored `agents/openai.yaml` cannot be parsed aborts the whole run, including `scan`, with a source-configuration error, so no managed artifact is created or changed from an ambiguous configuration.
 
-**In progress:** as of the "configurable multi-target tool exposure" work (issue #38 and its phased children), `install` no longer creates a Claude exposure symlink for newly installed artifacts, and status above is reconciled purely from base-store content. The `config.yaml` schema, validation, and `config init` have landed ([src/config.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/config.ts:1)), but nothing yet reads it to create or reconcile exposure symlinks -- that lands with per-target install granularity and the `sync` command (later phases). Only artifacts with a real, previously migrated exposure record still have it checked and removed on `uninstall`/`prune`. This paragraph and the bullets above will be reconciled once that work completes.
+**Exposure installation:** `install` creates or repairs one exposure symlink per (artifact, target) pair for every `config.yaml` target that declares the artifact's kind (a `skills` key for a skill, a `prompts` key for a prompt). No `config.yaml` still means base-store-only installation, exactly as before. A basePath conflict blocks the whole artifact; an exposure-level conflict blocks only that pair -- with no `--allow-conflicts`, `install --all`/`--only` abort the entire run naming every conflicting (artifact, target) pair and change nothing, and with `--allow-conflicts` the conflicting pairs are skipped and reported while every other exposure and artifact installs normally. Installing one artifact's several targets is best-effort: a later target's failure never rolls back an earlier target's success, and `exposures[]` always reflects exactly what verified on disk after the run. `uninstall` and `prune`'s `source-missing` cleanup revalidate that each recorded exposure is still an owned symlink to the entry's `basePath` immediately before deleting it; a foreign replacement is left alone and its record retained (reported on stderr) instead of being silently dropped, while the rest of the run -- including that same artifact's `basePath` and marker -- proceeds. Remaining work for the "configurable multi-target tool exposure" effort (issue #38): a `sync` command to reconcile exposures when `config.yaml` changes without any artifact content changing, and richer CLI/JSON reporting of per-target detail (the JSON report schema still surfaces only the first owned exposure per artifact).
 
 ## Important Invariants
 

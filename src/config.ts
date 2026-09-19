@@ -4,8 +4,9 @@ import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { ConfigurationError } from "./errors.js";
 import { resolveHome, TargetPaths } from "./paths.js";
+import type { ExposureKind } from "./types.js";
 
-export type ExposureKind = "skills" | "prompts";
+export type { ExposureKind } from "./types.js";
 
 export interface ConfigTarget {
   skills?: string | undefined;
@@ -52,7 +53,7 @@ function isAllowedPathFormat(value: string): boolean {
   return path.isAbsolute(value) || value.startsWith("~/");
 }
 
-function expandHome(value: string, home: string): string {
+export function expandHome(value: string, home: string): string {
   return value.startsWith("~/") ? path.join(home, value.slice(2)) : value;
 }
 

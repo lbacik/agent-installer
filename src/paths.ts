@@ -42,12 +42,21 @@ export function artifactId(kind: ArtifactKind, name: string): string {
   return `${kind}:${name}`;
 }
 
-export function getBasePath(paths: TargetPaths, artifact: Pick<DiscoveredArtifact, "kind" | "name">): string {
-  if (artifact.kind === "skill") {
-    return path.join(paths.agentsSkillsDir, artifact.name);
-  }
+// A skill lives at "<dir>/<name>"; a prompt lives at "<dir>/<name>.md". Both the
+// base-store copy and every configured exposure follow this same convention.
+function artifactEntryName(artifact: Pick<DiscoveredArtifact, "kind" | "name">): string {
+  return artifact.kind === "skill" ? artifact.name : `${artifact.name}.md`;
+}
 
-  return path.join(paths.agentsPromptsDir, `${artifact.name}.md`);
+export function getBasePath(paths: TargetPaths, artifact: Pick<DiscoveredArtifact, "kind" | "name">): string {
+  const dir = artifact.kind === "skill" ? paths.agentsSkillsDir : paths.agentsPromptsDir;
+  return path.join(dir, artifactEntryName(artifact));
+}
+
+// A configured target directory plus an artifact's kind/name yields the exposure path
+// that directory would hold for it.
+export function resolveExposurePath(targetDir: string, artifact: Pick<DiscoveredArtifact, "kind" | "name">): string {
+  return path.join(targetDir, artifactEntryName(artifact));
 }
 
 export function toSystemPath(basePath: string, relativePath: string): string {

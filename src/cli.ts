@@ -6,8 +6,15 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { runConfigInit } from "./config-init.js";
 import { loadConfig } from "./config.js";
-import { InstallConflictError, installAllFromSource, installArtifacts, removeArtifacts } from "./install.js";
-import { formatArtifactLine, formatConflictLine, formatOperationLine, formatRemovedLine } from "./format.js";
+import { collectExposureConflicts, InstallConflictError, installAllFromSource, installArtifacts, removeArtifacts } from "./install.js";
+import {
+  formatArtifactLine,
+  formatConflictLine,
+  formatExposureConflictLine,
+  formatOperationLine,
+  formatRemovedLine,
+  formatSkippedExposureLine
+} from "./format.js";
 import { promptForManagedArtifactRemovals, promptForSelections } from "./interactive.js";
 import {
   buildArtifactsErrorJson,
@@ -107,13 +114,20 @@ async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOption
     });
 
     const installed = selection.installIds.length > 0 ? await installArtifacts(installTargets) : [];
-    const removedEntries = selection.removeIds.length > 0 ? await removeArtifacts(selection.removeIds) : [];
+    const { removed: removedEntries, skippedExposures } =
+      selection.removeIds.length > 0 ? await removeArtifacts(selection.removeIds) : { removed: [], skippedExposures: [] };
 
     const operations = [
       ...installTargets.map((state) => formatOperationLine(state.status === "new" ? "created" : "updated", state.id)),
       ...removedEntries.map((entry) => formatOperationLine("removed", entry.id))
     ];
     printLines(operations);
+    for (const conflict of collectExposureConflicts(installTargets)) {
+      console.error(`skipped ${formatExposureConflictLine(conflict)}`);
+    }
+    for (const skipped of skippedExposures) {
+      console.error(formatSkippedExposureLine(skipped));
+    }
     if (installed.length === 0 && removedEntries.length === 0) {
       console.log("No changes applied.");
     }
@@ -206,7 +220,7 @@ function createProgram(): Command {
             throw new Error("Use --all for non-interactive installation.");
           }
 
-          const { states, installed, conflicts, pruned } = await installAllFromSource(
+          const { states, installed, conflicts, exposureConflicts, pruned, prunedSkippedExposures } = await installAllFromSource(
             inputPath,
             undefined,
             scanOptionsFromCommand(options),
@@ -228,11 +242,19 @@ function createProgram(): Command {
             console.error(`skipped ${formatConflictLine(state)}`);
           }
 
+          for (const conflict of exposureConflicts) {
+            console.error(`skipped ${formatExposureConflictLine(conflict)}`);
+          }
+
           if (pruned.length > 0) {
             console.log(`pruned ${pruned.length}`);
             for (const entry of pruned) {
               console.log(formatOperationLine("removed", entry.id));
             }
+          }
+
+          for (const skipped of prunedSkippedExposures) {
+            console.error(formatSkippedExposureLine(skipped));
           }
         } catch (error) {
           if (!json) {
@@ -251,8 +273,11 @@ function createProgram(): Command {
     .description("Remove managed artifacts by id, for example skill:review or prompt:commit-message.")
     .argument("<ids...>", "Managed artifact ids")
     .action(async (ids: string[]) => {
-      const removed = await removeArtifacts(ids);
+      const { removed, skippedExposures } = await removeArtifacts(ids);
       console.log(`removed ${removed.length}`);
+      for (const skipped of skippedExposures) {
+        console.error(formatSkippedExposureLine(skipped));
+      }
     });
 
   addJsonOption(
@@ -294,8 +319,11 @@ function createProgram(): Command {
           return;
         }
 
-        const removed = await removeArtifacts(selection.removeIds);
+        const { removed, skippedExposures } = await removeArtifacts(selection.removeIds);
         printLines(removed.map((entry) => formatOperationLine("removed", entry.id)));
+        for (const skipped of skippedExposures) {
+          console.error(formatSkippedExposureLine(skipped));
+        }
         if (removed.length === 0) {
           console.log("No changes applied.");
         }

@@ -1,22 +1,53 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { loadConfig } from "./config.js";
-import { formatConflictLine } from "./format.js";
+import { AgentInstallerConfig, expandHome, loadConfig } from "./config.js";
+import { formatConflictLine, formatExposureConflictLine } from "./format.js";
 import { hashArtifact } from "./hash.js";
-import { artifactId, getBasePath, getMarkerPath, resolveTargetPaths, TargetPaths } from "./paths.js";
+import { artifactId, getBasePath, getMarkerPath, resolveExposurePath, resolveHome, resolveTargetPaths, TargetPaths } from "./paths.js";
 import { materializeOverlay, resolveInvocationPolicyOverlay } from "./skill-invocation-policy.js";
 import { loadState, saveState } from "./state.js";
 import type { ScanSourceOptions } from "./source.js";
 import { resolveSourceInput, type ResolveSourceOptions } from "./source-resolver.js";
-import { ArtifactState, DiscoveredArtifact, ExposureRecord, ManagedEntry, OverlayFile, RemovedArtifactState } from "./types.js";
+import {
+  ArtifactState,
+  DiscoveredArtifact,
+  ExposureConflictSummary,
+  ExposureKind,
+  ExposurePlanEntry,
+  ExposureRecord,
+  ManagedEntry,
+  OverlayFile,
+  RemovedArtifactState,
+  SkippedExposureRemoval
+} from "./types.js";
+
+export type { ExposureConflictSummary } from "./types.js";
+
+export function collectExposureConflicts(states: ArtifactState[]): ExposureConflictSummary[] {
+  return states.flatMap((state) =>
+    state.exposurePlan
+      .filter((entry) => entry.status === "conflict")
+      .map((entry) => ({
+        id: state.id,
+        targetName: entry.targetName,
+        kind: entry.kind,
+        path: entry.path,
+        reason: entry.reason ?? "conflict"
+      }))
+  );
+}
 
 // Thrown by installAllFromSource when unmanaged conflicts block the install and --allow-conflicts was not passed.
 export class InstallConflictError extends Error {
-  constructor(public readonly conflicts: ArtifactState[]) {
+  constructor(
+    public readonly conflicts: ArtifactState[],
+    public readonly exposureConflicts: ExposureConflictSummary[] = []
+  ) {
     super(
       [
-        `Refusing to install: ${conflicts.length} artifact(s) conflict with unmanaged targets.`,
+        `Refusing to install: ${conflicts.length + exposureConflicts.length} artifact(s)/target(s) conflict with unmanaged targets.`,
         ...conflicts.map((state) => `  ${formatConflictLine(state)}`),
+        ...exposureConflicts.map((conflict) => `  ${formatExposureConflictLine(conflict)}`),
         "Use --allow-conflicts to install the remaining eligible artifacts and skip these."
       ].join("\n")
     );
@@ -64,6 +95,96 @@ async function ensureParentDir(targetPath: string): Promise<void> {
 
 async function removePath(targetPath: string): Promise<void> {
   await fs.rm(targetPath, { recursive: true, force: true });
+}
+
+function exposureKindOf(kind: DiscoveredArtifact["kind"]): ExposureKind {
+  return kind === "skill" ? "skills" : "prompts";
+}
+
+// Computes, for one artifact, the desired exposure at every currently configured target
+// that declares its kind. Never touches disk beyond reading whether a path exists and,
+// if so, what it links to -- callers decide whether/how to act on the plan.
+async function buildExposurePlan(
+  config: AgentInstallerConfig | null,
+  home: string,
+  artifact: DiscoveredArtifact,
+  basePath: string
+): Promise<ExposurePlanEntry[]> {
+  if (config === null) {
+    return [];
+  }
+
+  const kind = exposureKindOf(artifact.kind);
+  const plan: ExposurePlanEntry[] = [];
+
+  for (const [targetName, target] of Object.entries(config.targets)) {
+    const rawDir = target[kind];
+    if (rawDir === undefined) {
+      continue;
+    }
+
+    const exposurePath = resolveExposurePath(expandHome(rawDir, home), artifact);
+
+    if (!(await pathExists(exposurePath))) {
+      plan.push({ targetName, kind, path: exposurePath, status: "new" });
+      continue;
+    }
+
+    const symlinkTarget = await readSymlinkTarget(exposurePath);
+    if (symlinkTarget === basePath) {
+      plan.push({ targetName, kind, path: exposurePath, status: "match" });
+    } else {
+      plan.push({
+        targetName,
+        kind,
+        path: exposurePath,
+        status: "conflict",
+        reason: `Exposure path for target "${targetName}" already exists but is not managed by this installer.`
+      });
+    }
+  }
+
+  return plan;
+}
+
+// Applies one artifact's exposure plan, best-effort per target: a "new" entry is
+// (re)created, a "match" entry is left alone, and a "conflict" entry is never touched.
+// A failed creation is skipped rather than retried or rolled back, so a later target's
+// success is never undone by an earlier target's failure. The returned exposures
+// reflect exactly what verified as correct on disk after every attempt, merged with
+// whatever the entry already owned outside the current plan (e.g. a legacy exposure, or
+// one for a target no longer declared in config.yaml).
+async function applyExposurePlan(
+  plan: ExposurePlanEntry[],
+  basePath: string,
+  existingExposures: ExposureRecord[]
+): Promise<ExposureRecord[]> {
+  const byPath = new Map(existingExposures.map((exposure) => [exposure.path, exposure]));
+
+  for (const entry of plan) {
+    if (entry.status === "conflict") {
+      continue;
+    }
+
+    if (entry.status === "match") {
+      byPath.set(entry.path, { path: entry.path, targetName: entry.targetName });
+      continue;
+    }
+
+    try {
+      await ensureParentDir(entry.path);
+      await removePath(entry.path);
+      await fs.symlink(basePath, entry.path);
+    } catch {
+      continue;
+    }
+
+    if ((await readSymlinkTarget(entry.path)) === basePath) {
+      byPath.set(entry.path, { path: entry.path, targetName: entry.targetName });
+    }
+  }
+
+  return [...byPath.values()];
 }
 
 async function resolveOverlay(artifact: DiscoveredArtifact): Promise<OverlayFile | null> {
@@ -143,7 +264,8 @@ export async function collectArtifactStates(
   removed: RemovedArtifactState[];
 }> {
   const paths = resolveTargetPaths(home);
-  await loadConfig(paths, home);
+  const config = await loadConfig(paths, home);
+  const resolvedHome = resolveHome(home);
   const state = await loadState(paths);
   const sourceIds = new Set(sourceArtifacts.map((artifact) => artifactId(artifact.kind, artifact.name)));
   const entriesById = new Map(state.entries.map((entry) => [entry.id, entry]));
@@ -175,12 +297,21 @@ export async function collectArtifactStates(
       installedHash = await hashArtifact(artifact.kind, basePath);
     }
 
+    // A basePath conflict blocks the whole artifact, so its exposures are never
+    // evaluated; otherwise a desired-but-missing exposure counts as drift, bumping an
+    // otherwise-unchanged artifact to "installed-different" so install picks it back up.
+    const exposurePlan = status === "conflict" ? [] : await buildExposurePlan(config, resolvedHome, artifact, basePath);
+    if (status === "installed-same" && exposurePlan.some((entry) => entry.status === "new")) {
+      status = "installed-different";
+    }
+
     const nextState: ArtifactState = {
       artifact,
       id,
       basePath,
       sourceHash,
       installedHash,
+      exposurePlan,
       status,
       managedEntry
     };
@@ -212,6 +343,15 @@ export async function collectArtifactStates(
   return { states, removed };
 }
 
+function saveEntries(paths: TargetPaths, entries: Map<string, ManagedEntry>): Promise<void> {
+  return saveState(paths, { version: 3, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
+}
+
+// Each artifact's base copy and every one of its target exposures are installed and
+// persisted before moving to the next artifact, so a mid-run crash never leaves more
+// than one artifact's state out of sync with what is actually on disk (multi-target
+// work within a single artifact is itself best-effort with no rollback; see
+// applyExposurePlan).
 export async function installArtifacts(states: ArtifactState[], home?: string): Promise<ManagedEntry[]> {
   const paths = resolveTargetPaths(home);
   const state = await loadState(paths);
@@ -227,22 +367,37 @@ export async function installArtifacts(states: ArtifactState[], home?: string): 
 
     const installedHash = await hashArtifact(current.artifact.kind, current.basePath);
     const existingExposures = entries.get(current.id)?.exposures ?? [];
-    const entry = buildManagedEntry(current.artifact, paths, current.sourceHash, installedHash, existingExposures);
+    const exposures = await applyExposurePlan(current.exposurePlan, current.basePath, existingExposures);
+    const entry = buildManagedEntry(current.artifact, paths, current.sourceHash, installedHash, exposures);
     await writeMarker(entry);
     entries.set(entry.id, entry);
     installed.push(entry);
+
+    await saveEntries(paths, entries);
   }
 
-  await saveState(paths, { version: 3, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
   return installed;
 }
 
-export async function removeArtifacts(ids: string[], home?: string): Promise<ManagedEntry[]> {
+export interface RemoveArtifactsResult {
+  removed: ManagedEntry[];
+  skippedExposures: SkippedExposureRemoval[];
+}
+
+// Immediately before deleting each recorded exposure, re-verifies it is still a symlink
+// pointing at the entry's basePath (ownership revalidation). A path a foreign
+// file/dir/symlink has since replaced is left alone and its record retained rather than
+// silently dropped; every other exposure, and the basePath and marker themselves
+// (never revalidated -- ~/.agents is this tool's sole managed territory), are still
+// removed. Each id is persisted right after it finishes, bounding a mid-run crash to at
+// most one in-flight artifact.
+export async function removeArtifacts(ids: string[], home?: string): Promise<RemoveArtifactsResult> {
   const paths = resolveTargetPaths(home);
   await loadConfig(paths, home);
   const state = await loadState(paths);
   const entries = new Map(state.entries.map((entry) => [entry.id, entry]));
   const removed: ManagedEntry[] = [];
+  const skippedExposures: SkippedExposureRemoval[] = [];
 
   for (const id of ids) {
     const entry = entries.get(id);
@@ -250,18 +405,34 @@ export async function removeArtifacts(ids: string[], home?: string): Promise<Man
       continue;
     }
 
+    const retainedExposures: ExposureRecord[] = [];
     for (const exposure of entry.exposures) {
-      await removePath(exposure.path);
+      if (!(await pathExists(exposure.path))) {
+        continue;
+      }
+
+      if ((await readSymlinkTarget(exposure.path)) === entry.basePath) {
+        await removePath(exposure.path);
+      } else {
+        retainedExposures.push(exposure);
+        skippedExposures.push({ id, path: exposure.path, targetName: exposure.targetName });
+      }
     }
 
     await removePath(entry.basePath);
     await removePath(getMarkerPath(entry.basePath, entry.kind));
-    entries.delete(id);
+
+    if (retainedExposures.length > 0) {
+      entries.set(id, { ...entry, exposures: retainedExposures });
+    } else {
+      entries.delete(id);
+    }
+
     removed.push(entry);
+    await saveEntries(paths, entries);
   }
 
-  await saveState(paths, { version: 3, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
-  return removed;
+  return { removed, skippedExposures };
 }
 
 export interface InstallAllOptions {
@@ -274,7 +445,9 @@ export interface InstallAllResult {
   states: ArtifactState[];
   installed: ManagedEntry[];
   conflicts: ArtifactState[];
+  exposureConflicts: ExposureConflictSummary[];
   pruned: RemovedArtifactState[];
+  prunedSkippedExposures: SkippedExposureRemoval[];
 }
 
 export async function installAllFromSource(
@@ -300,20 +473,23 @@ export async function installAllFromSource(
     const { states, removed } = await collectArtifactStates(artifacts, home, source.sourceIdentity);
     const selectedStates = installOptions?.only === undefined ? states : selectStates(states, installOptions.only);
     const { installable, conflicts } = partitionInstallAllStates(selectedStates);
+    const exposureConflicts = collectExposureConflicts(selectedStates);
 
-    if (conflicts.length > 0 && installOptions?.allowConflicts !== true) {
-      throw new InstallConflictError(conflicts);
+    if ((conflicts.length > 0 || exposureConflicts.length > 0) && installOptions?.allowConflicts !== true) {
+      throw new InstallConflictError(conflicts, exposureConflicts);
     }
 
     const installed = await installArtifacts(installable, home);
 
     let pruned: RemovedArtifactState[] = [];
+    let prunedSkippedExposures: SkippedExposureRemoval[] = [];
     if (installOptions?.prune === true && removed.length > 0) {
-      await removeArtifacts(removed.map((entry) => entry.id), home);
+      const pruneResult = await removeArtifacts(removed.map((entry) => entry.id), home);
       pruned = removed;
+      prunedSkippedExposures = pruneResult.skippedExposures;
     }
 
-    return { states, installed, conflicts, pruned };
+    return { states, installed, conflicts, exposureConflicts, pruned, prunedSkippedExposures };
   } finally {
     await source.cleanup();
   }
