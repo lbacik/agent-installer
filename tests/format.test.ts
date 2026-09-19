@@ -12,6 +12,10 @@ import {
 } from "../src/format.js";
 import type { ArtifactState, ExposureState, ManagedEntry } from "../src/types.js";
 
+function stripAnsi(line: string | undefined): string {
+  return (line ?? "").replace(/\u001b\[[0-9;]*m/g, "");
+}
+
 function makeState(
   id: string,
   status: ArtifactState["status"],
@@ -164,7 +168,7 @@ describe("formatArtifactLine exposure breakdown", () => {
   });
 
   it("leaves the line unchanged with no exposures at all", () => {
-    expect(formatArtifactLine(makeState("skill:review", "new"))).not.toMatch(/\[/);
+    expect(stripAnsi(formatArtifactLine(makeState("skill:review", "new")))).not.toMatch(/\[/);
   });
 
   it("appends a bracketed breakdown when multiple targets are configured", () => {
@@ -245,7 +249,7 @@ describe("formatManagedEntryLines exposure breakdown", () => {
     const single = new Map([
       ["skill:review", [{ targetName: "claude", path: "/c/review", status: "installed-same" as const }]]
     ]);
-    expect(formatManagedEntryLines(entries, single)[0]).not.toMatch(/\[/);
+    expect(stripAnsi(formatManagedEntryLines(entries, single)[0])).not.toMatch(/\[/);
 
     const multi = new Map([
       [
