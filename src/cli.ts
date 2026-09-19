@@ -4,8 +4,19 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Command } from "commander";
-import { InstallConflictError, installAllFromSource, installArtifacts, removeArtifacts } from "./install.js";
-import { formatArtifactLine, formatConflictLine, formatOperationLine, formatRemovedLine } from "./format.js";
+import { runConfigInit } from "./config-init.js";
+import { loadConfig } from "./config.js";
+import { collectExposureConflicts, InstallConflictError, installAllFromSource, installArtifacts, removeArtifacts } from "./install.js";
+import {
+  formatArtifactLine,
+  formatConflictLine,
+  formatExposureConflictLine,
+  formatOperationLine,
+  formatRemovedLine,
+  formatSkippedExposureLine,
+  formatSyncActionLine,
+  formatSyncLegacyNoticeLine
+} from "./format.js";
 import { promptForManagedArtifactRemovals, promptForSelections } from "./interactive.js";
 import {
   buildArtifactsErrorJson,
@@ -17,6 +28,7 @@ import {
 import { resolveTargetPaths } from "./paths.js";
 import { loadState } from "./state.js";
 import { withResolvedArtifactStates } from "./source-workflow.js";
+import { syncExposures } from "./sync.js";
 import type { ScanSourceOptions } from "./source.js";
 import type { ArtifactState } from "./types.js";
 
@@ -105,13 +117,20 @@ async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOption
     });
 
     const installed = selection.installIds.length > 0 ? await installArtifacts(installTargets) : [];
-    const removedEntries = selection.removeIds.length > 0 ? await removeArtifacts(selection.removeIds) : [];
+    const { removed: removedEntries, skippedExposures } =
+      selection.removeIds.length > 0 ? await removeArtifacts(selection.removeIds) : { removed: [], skippedExposures: [] };
 
     const operations = [
       ...installTargets.map((state) => formatOperationLine(state.status === "new" ? "created" : "updated", state.id)),
       ...removedEntries.map((entry) => formatOperationLine("removed", entry.id))
     ];
     printLines(operations);
+    for (const conflict of collectExposureConflicts(installTargets)) {
+      console.error(`skipped ${formatExposureConflictLine(conflict)}`);
+    }
+    for (const skipped of skippedExposures) {
+      console.error(formatSkippedExposureLine(skipped));
+    }
     if (installed.length === 0 && removedEntries.length === 0) {
       console.log("No changes applied.");
     }
@@ -204,7 +223,7 @@ function createProgram(): Command {
             throw new Error("Use --all for non-interactive installation.");
           }
 
-          const { states, installed, conflicts, pruned } = await installAllFromSource(
+          const { states, installed, conflicts, exposureConflicts, pruned, prunedSkippedExposures } = await installAllFromSource(
             inputPath,
             undefined,
             scanOptionsFromCommand(options),
@@ -226,11 +245,19 @@ function createProgram(): Command {
             console.error(`skipped ${formatConflictLine(state)}`);
           }
 
+          for (const conflict of exposureConflicts) {
+            console.error(`skipped ${formatExposureConflictLine(conflict)}`);
+          }
+
           if (pruned.length > 0) {
             console.log(`pruned ${pruned.length}`);
             for (const entry of pruned) {
               console.log(formatOperationLine("removed", entry.id));
             }
+          }
+
+          for (const skipped of prunedSkippedExposures) {
+            console.error(formatSkippedExposureLine(skipped));
           }
         } catch (error) {
           if (!json) {
@@ -249,8 +276,11 @@ function createProgram(): Command {
     .description("Remove managed artifacts by id, for example skill:review or prompt:commit-message.")
     .argument("<ids...>", "Managed artifact ids")
     .action(async (ids: string[]) => {
-      const removed = await removeArtifacts(ids);
+      const { removed, skippedExposures } = await removeArtifacts(ids);
       console.log(`removed ${removed.length}`);
+      for (const skipped of skippedExposures) {
+        console.error(formatSkippedExposureLine(skipped));
+      }
     });
 
   addJsonOption(
@@ -266,7 +296,9 @@ function createProgram(): Command {
     .action(async (options: { listLength?: number; json?: boolean }) => {
       const json = options.json === true;
       try {
-        const state = await loadState(resolveTargetPaths());
+        const paths = resolveTargetPaths();
+        await loadConfig(paths);
+        const state = await loadState(paths);
 
         if (json) {
           printJson(await buildListJson(state.entries));
@@ -290,8 +322,11 @@ function createProgram(): Command {
           return;
         }
 
-        const removed = await removeArtifacts(selection.removeIds);
+        const { removed, skippedExposures } = await removeArtifacts(selection.removeIds);
         printLines(removed.map((entry) => formatOperationLine("removed", entry.id)));
+        for (const skipped of skippedExposures) {
+          console.error(formatSkippedExposureLine(skipped));
+        }
         if (removed.length === 0) {
           console.log("No changes applied.");
         }
@@ -303,6 +338,53 @@ function createProgram(): Command {
         printJson(buildArtifactsErrorJson(error));
         process.exitCode = 1;
       }
+    });
+
+  program
+    .command("sync")
+    .description("Reconcile installed artifacts' exposures against the current config.yaml, without touching sources or content.")
+    .option("--only <artifact-id>", "Sync only this artifact id, for example skill:review (repeatable)", collectOnly, [])
+    .option("--target <name>", "Sync only this config.yaml target name (repeatable)", collectOnly, [])
+    .option("--allow-conflicts", "Sync the eligible pairs and skip conflicting ones instead of aborting")
+    .option("--dry-run", "Print the planned actions without touching the filesystem or state")
+    .action(async (options: { only: string[]; target: string[]; allowConflicts?: boolean; dryRun?: boolean }) => {
+      const result = await syncExposures({
+        only: options.only.length > 0 ? options.only : undefined,
+        targets: options.target.length > 0 ? options.target : undefined,
+        allowConflicts: options.allowConflicts === true,
+        dryRun: options.dryRun === true
+      });
+
+      const printable = result.actions.filter((action) => action.action !== "match" && action.action !== "conflict");
+      const conflicts = result.actions.filter((action) => action.action === "conflict");
+
+      if (result.dryRun) {
+        console.log(`planned ${printable.length} change(s)`);
+      }
+
+      printLines(printable.map(formatSyncActionLine));
+      const conflictPrefix = result.dryRun ? "would skip" : "skipped";
+      for (const conflict of conflicts) {
+        console.error(`${conflictPrefix} ${formatSyncActionLine(conflict)}`);
+      }
+
+      printLines(result.legacyNotices.map(formatSyncLegacyNoticeLine));
+      for (const skipped of result.skippedOrphanRemovals) {
+        console.error(formatSkippedExposureLine(skipped));
+      }
+
+      if (!result.dryRun && printable.length === 0 && result.legacyNotices.length === 0) {
+        console.log("Nothing to sync.");
+      }
+    });
+
+  const configCommand = program.command("config").description("Manage the ~/.agents/agent-installer/config.yaml exposure configuration.");
+  configCommand
+    .command("init")
+    .description("Interactively create config.yaml with one or more exposure targets.")
+    .option("--force", "Overwrite an existing config.yaml without confirmation")
+    .action(async (options: { force?: boolean }) => {
+      await runConfigInit(resolveTargetPaths(), { force: options.force === true });
     });
 
   return program;

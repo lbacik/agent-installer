@@ -286,6 +286,23 @@ Print managed entries as JSON instead of opening the interactive selection UI:
 agent-installer list --json
 ```
 
+Create `~/.agents/agent-installer/config.yaml`, prompting for one or more named
+exposure targets (each with an optional skills directory and/or prompts
+directory). Offers a "claude" preset that prefills `~/.claude/skills` and
+`~/.claude/commands`, or a previously detected legacy Claude exposure
+directory if one exists. Refuses to overwrite an existing `config.yaml` unless
+you confirm or pass `--force`:
+
+```bash
+agent-installer config init
+agent-installer config init --force
+```
+
+When `config.yaml` exists, `scan`, `list`, `install`, `uninstall`, and
+interactive mode all validate it at startup and abort with an error naming
+the file and the problem if it is malformed. No `config.yaml` means
+base-store-only installation.
+
 ### Machine-Readable JSON Output
 
 `scan`, `install`, and `list` accept `--json`. Under `--json`:

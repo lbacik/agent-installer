@@ -21,11 +21,11 @@ function makeState(
     },
     id,
     basePath: `/home/.agents/${kind === "skill" ? `skills/${name}` : `prompts/${name}.md`}`,
-    exposurePath: `/home/.claude/${kind === "skill" ? `skills/${name}` : `commands/${name}.md`}`,
     sourceHash: "source-hash",
     installedHash: status === "new" ? null : "installed-hash",
     status,
     managedEntry: null,
+    exposurePlan: [],
     ...(conflictReason === undefined ? {} : { conflictReason }),
     ...(conflictPath === undefined ? {} : { conflictPath })
   };
@@ -40,7 +40,7 @@ describe("formatManagedEntryLines", () => {
       sourceRoot: "/source/repo",
       relativeSourcePath: "skills/review",
       basePath: "/home/user/.agents/skills/review",
-      exposurePath: "/home/user/.claude/skills/review",
+      exposures: [],
       sourceHash: "source-hash",
       installedHash: "installed-hash",
       installedAt: "2026-07-08T00:00:00.000Z"
@@ -57,7 +57,7 @@ describe("formatManagedEntryLines", () => {
       sourceRoot: "git+https://github.com/org/repo.git",
       relativeSourcePath: "skills/review",
       basePath: "/home/user/.agents/skills/review",
-      exposurePath: "/home/user/.claude/skills/review",
+      exposures: [],
       sourceHash: "source-hash",
       installedHash: "installed-hash",
       installedAt: "2026-07-08T00:00:00.000Z"
@@ -74,7 +74,7 @@ describe("formatManagedEntryLines", () => {
       sourceRoot: "git+https://github.com/org/repo.git",
       relativeSourcePath: "skills/review",
       basePath: "/home/user/.agents/skills/review",
-      exposurePath: "/home/user/.claude/skills/review",
+      exposures: [],
       sourceHash: "source-hash",
       installedHash: "installed-hash",
       installedAt: "2026-07-08T00:00:00.000Z",
@@ -96,7 +96,7 @@ describe("formatManagedEntryLines", () => {
         sourceRoot: "/source/repo",
         relativeSourcePath: "skills/review",
         basePath: "/home/user/.agents/skills/review",
-        exposurePath: "/home/user/.claude/skills/review",
+        exposures: [],
         sourceHash: "source-hash",
         installedHash: "installed-hash",
         installedAt: "2026-07-08T00:00:00.000Z"
@@ -108,7 +108,7 @@ describe("formatManagedEntryLines", () => {
         sourceRoot: "/source/repo",
         relativeSourcePath: "prompts/commit-message.md",
         basePath: "/home/user/.agents/prompts/commit-message.md",
-        exposurePath: "/home/user/.claude/commands/commit-message.md",
+        exposures: [],
         sourceHash: "source-hash",
         installedHash: "installed-hash",
         installedAt: "2026-07-08T00:00:00.000Z"
@@ -149,7 +149,7 @@ describe("formatConflictLine", () => {
     expect(formatConflictLine(state)).toBe("skill:review -> /home/.agents/skills/review");
   });
 
-  it("prints the exposure path instead when the conflict is about the Claude symlink, not the base store", () => {
+  it("prints conflictPath instead of basePath when the state sets it", () => {
     const state = makeState(
       "skill:review",
       "conflict",

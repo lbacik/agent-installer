@@ -53,14 +53,17 @@ Generated managed content:
 - `~/.agents/skills/<name>/agents/openai.yaml` is materialized when the source `SKILL.md` frontmatter sets the top-level boolean `disable-model-invocation: true`. It carries `policy.allow_implicit_invocation: false` so Codex matches the Claude invocation intent. The source repository is never modified.
 - When such a skill also ships an authored `agents/openai.yaml`, the managed copy retains that file (unrelated keys, sibling `policy` keys, and comments) and only overrides `policy.allow_implicit_invocation`. The file is re-serialized, so formatting may be normalized; an empty `policy:` key is filled in rather than rejected. The Claude setting takes precedence over a conflicting authored policy. Authored metadata that is not a YAML mapping, or whose `policy` is not a mapping, aborts with a source-configuration error before the managed target is created or changed. Skills whose frontmatter does not enable the translation are never validated.
 
-Claude exposure paths:
+Exposure paths, one per `config.yaml` target that declares an artifact's kind:
 
-- `~/.claude/skills/<name>` -> symlink to `~/.agents/skills/<name>`
-- `~/.claude/commands/<name>.md` -> symlink to `~/.agents/prompts/<name>.md`
+- `<target.skills>/<name>` -> symlink to `~/.agents/skills/<name>`
+- `<target.prompts>/<name>.md` -> symlink to `~/.agents/prompts/<name>.md`
 
-State and ownership metadata:
+`config init`'s "claude" preset prefills `~/.claude/skills` / `~/.claude/commands` for exactly this pattern, but any target name and directory pair works the same way. No `config.yaml` means no exposures are created at all.
+
+State, configuration, and ownership metadata:
 
 - state file: `~/.agents/agent-installer/state.json`
+- configuration file: `~/.agents/agent-installer/config.yaml` (optional; `version: 1` plus named `targets: { name: { skills?, prompts? } }`, strictly validated by [src/config.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/config.ts:1)). No `config.yaml` means base-store-only installation. A malformed file aborts every config-aware command (`scan`, `list`, `install`, `uninstall`, interactive mode) at startup, naming the file and the problem. `agent-installer config init` creates it interactively.
 - marker files:
   - skill: `<basePath>/.agent-installer.json`
   - prompt: `<basePath>.agent-installer.json`
@@ -100,6 +103,30 @@ Implemented commands:
   - removes managed artifacts by id, for example `skill:review`
 - `agent-installer list`
   - prints managed entries from state
+- `agent-installer config init`
+  - interactively creates `~/.agents/agent-installer/config.yaml` with one or more named exposure targets
+  - offers a "claude" preset prefilled with `~/.claude/skills` / `~/.claude/commands`, or a detected legacy
+    exposure directory when one exists
+  - refuses to overwrite an existing `config.yaml` unless confirmed or run with `--force`
+- `agent-installer sync [--only <artifact-id>...] [--target <name>...] [--allow-conflicts] [--dry-run]`
+  - reconciles already-managed artifacts' `exposures[]` against the exposures the current `config.yaml` desires,
+    without contacting a source repository or touching base-store content or content hashes
+  - no flags means full convergence across every managed artifact and every configured target; `--only` narrows
+    by artifact id, `--target` narrows by target name (a target name that no longer exists in `config.yaml` but
+    still owns a recorded exposure is accepted, since that is exactly the orphan `sync` is meant to clean up);
+    combinable
+  - per (artifact, target, kind): creates a missing desired exposure, moves one whose target's resolved path
+    changed (removing the stale symlink first), and auto-removes one whose target was removed or narrowed to no
+    longer declare that kind (orphaned, no opt-in flag needed) -- orphan and stale-path removal both revalidate
+    ownership immediately before deleting, exactly like `uninstall`/`prune`, leaving a foreign replacement alone
+    and reporting it instead of dropping the record; for a moved target, a foreign replacement at the stale path
+    also skips creating the new exposure that round, so the pair never ends up with two exposure records for the
+    same target
+  - a legacy exposure (`targetName: null`) is never modified by `sync`, only surfaced as a notice
+  - conflict handling mirrors `install --all`: aborts with zero changes if any touched pair conflicts, naming
+    every conflicting pair, unless `--allow-conflicts` is passed
+  - `--dry-run` always prints the full planned create/move/remove/conflict actions without touching the
+    filesystem or state, even when a conflict would otherwise abort a real run
 
 ## Status Model
 
@@ -114,12 +141,14 @@ Artifacts are reconciled into these states:
 Meaning:
 
 - `new`: not installed yet
-- `installed-same`: managed install matches the source content hash and the Claude exposure symlink is present and points at the managed base path
-- `installed-different`: managed install exists but source content changed, or the Claude exposure symlink is missing; a missing exposure counts as drift, not a match, even when the base-store content is unchanged
+- `installed-same`: managed install matches the source content hash, and every exposure configured for it -- one per `config.yaml` target that declares the artifact's kind -- is present and points at the managed base path
+- `installed-different`: managed install exists but source content changed, or a configured exposure is missing; a missing exposure counts as drift, not a match, even when the base-store content is unchanged
 - `source-missing`: previously managed entry is no longer present in the currently scanned source repository
-- `conflict`: target path exists but is not managed by this tool, or the Claude exposure path exists but is not a symlink to the expected managed base path
+- `conflict`: the base-store target path exists but is not managed by this tool. This blocks the whole artifact. A conflict on a single configured *exposure* (the path exists but is not a symlink to the managed base path) does not set this status -- it blocks only that one (artifact, target) pair, reported separately (see below)
 
 Reconciliation has no status for an unusable source. A skill whose Claude frontmatter enables the Codex invocation-policy translation but whose authored `agents/openai.yaml` cannot be parsed aborts the whole run, including `scan`, with a source-configuration error, so no managed artifact is created or changed from an ambiguous configuration.
+
+**Exposure installation:** `install` creates or repairs one exposure symlink per (artifact, target) pair for every `config.yaml` target that declares the artifact's kind (a `skills` key for a skill, a `prompts` key for a prompt). No `config.yaml` still means base-store-only installation, exactly as before. A basePath conflict blocks the whole artifact; an exposure-level conflict blocks only that pair -- with no `--allow-conflicts`, `install --all`/`--only` abort the entire run naming every conflicting (artifact, target) pair and change nothing, and with `--allow-conflicts` the conflicting pairs are skipped and reported while every other exposure and artifact installs normally. Installing one artifact's several targets is best-effort: a later target's failure never rolls back an earlier target's success, and `exposures[]` always reflects exactly what verified on disk after the run. `uninstall` and `prune`'s `source-missing` cleanup revalidate that each recorded exposure is still an owned symlink to the entry's `basePath` immediately before deleting it; a foreign replacement is left alone and its record retained (reported on stderr) instead of being silently dropped, while the rest of the run -- including that same artifact's `basePath` and marker -- proceeds. `install` itself never cleans up an exposure a `config.yaml` edit made stale (a moved or narrowed/removed target); that reconciliation is `sync`'s job, described above. Remaining work for the "configurable multi-target tool exposure" effort (issue #38): richer CLI/JSON reporting of per-target detail for `scan`/`list` (the JSON report schema still surfaces only the first owned exposure per artifact, and per-(artifact, target) status reporting is still pending).
 
 ## Important Invariants
 
@@ -135,11 +164,14 @@ Reconciliation has no status for an unusable source. A skill whose Claude frontm
 - [src/cli.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/cli.ts:1): command parsing and top-level flows
 - [src/source.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/source.ts:1): source scanning
 - [src/install.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/install.ts:1): reconciliation, install, uninstall
+- [src/sync.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/sync.ts:1): exposure-only reconciliation against `config.yaml`, with no source contact
 - [src/state.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/state.ts:1): persisted managed state
 - [src/paths.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/paths.ts:1): target-path resolution
 - [src/hash.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/hash.ts:1): content hashing, including the materialized overlay used for expected source hashes
 - [src/skill-invocation-policy.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/skill-invocation-policy.ts:1): Claude-to-Codex invocation policy translation
 - [src/interactive.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/interactive.ts:1): interactive selection UI
+- [src/config.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/config.ts:1): `config.yaml` schema, loading, and path validation
+- [src/config-init.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/config-init.ts:1): interactive `config init` flow
 
 ## Working Rules
 
@@ -167,6 +199,8 @@ Key tests live in:
 
 - [tests/scanner.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/scanner.test.ts:1)
 - [tests/install.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/install.test.ts:1)
+- [tests/config.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/config.test.ts:1)
+- [tests/sync.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/sync.test.ts:1)
 
 ## Release
 

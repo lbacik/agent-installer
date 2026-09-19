@@ -7,7 +7,7 @@ import { hashArtifact } from "../src/hash.js";
 import { collectArtifactStates, installAllFromSource, installArtifacts, removeArtifacts } from "../src/install.js";
 import { resolveTargetPaths } from "../src/paths.js";
 import { scanSourceRepository } from "../src/source.js";
-import { loadState } from "../src/state.js";
+import { loadState, saveState } from "../src/state.js";
 import type { GitRunner } from "../src/source-resolver.js";
 
 const tempDirs: string[] = [];
@@ -53,6 +53,11 @@ async function writeCodexMetadata(skillPath: string, content: string): Promise<v
   await fs.writeFile(path.join(skillPath, CODEX_METADATA_PATH), content, "utf8");
 }
 
+async function writeConfigYaml(paths: ReturnType<typeof resolveTargetPaths>, yaml: string): Promise<void> {
+  await fs.mkdir(paths.stateDir, { recursive: true });
+  await fs.writeFile(paths.configFile, yaml, "utf8");
+}
+
 async function installAll(repo: string, home: string): Promise<void> {
   const artifacts = await scanSourceRepository(repo);
   const { states } = await collectArtifactStates(artifacts, home);
@@ -89,7 +94,7 @@ afterEach(async () => {
 });
 
 describe("install lifecycle", () => {
-  it("installs canonical copies and Claude symlinks", async () => {
+  it("installs canonical copies without creating any exposure", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-home-");
 
@@ -100,13 +105,14 @@ describe("install lifecycle", () => {
     const paths = resolveTargetPaths(home);
     expect(await fs.readFile(path.join(paths.agentsSkillsDir, "review", "SKILL.md"), "utf8")).toContain("# Review");
     expect(await fs.readFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "utf8")).toContain("commit prompt");
-    expect(await fs.readlink(path.join(paths.claudeSkillsDir, "review"))).toBe(path.join(paths.agentsSkillsDir, "review"));
-    expect(await fs.readlink(path.join(paths.claudeCommandsDir, "commit-message.md"))).toBe(
-      path.join(paths.agentsPromptsDir, "commit-message.md")
-    );
+    await expect(fs.access(path.join(paths.claudeSkillsDir, "review"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.access(path.join(paths.claudeCommandsDir, "commit-message.md"))).rejects.toMatchObject({
+      code: "ENOENT"
+    });
 
     const state = await loadState(paths);
     expect(state.entries.map((entry) => entry.id)).toEqual(["prompt:commit-message", "skill:review"]);
+    expect(state.entries.every((entry) => entry.exposures.length === 0)).toBe(true);
   });
 
   it("classifies changed source artifacts as installed-different", async () => {
@@ -343,35 +349,6 @@ describe("install --all conflict handling", () => {
     expect(state.entries.map((entry) => entry.id)).toEqual(["skill:review"]);
     expect(await fs.readFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "utf8")).toBe("user-owned\n");
   });
-
-  it("names the exposure path, not the (nonexistent) base path, when only the Claude symlink conflicts", async () => {
-    const repo = await makeRepo();
-    const home = await makeTempDir("agent-installer-home-");
-    const paths = resolveTargetPaths(home);
-    const foreignTarget = await makeTempDir("agent-installer-foreign-");
-    await fs.mkdir(paths.claudeSkillsDir, { recursive: true });
-    await fs.symlink(foreignTarget, path.join(paths.claudeSkillsDir, "review"));
-
-    await expect(installAllFromSource(repo, home)).rejects.toThrow(path.join(paths.claudeSkillsDir, "review"));
-
-    const state = await loadState(paths);
-    expect(state.entries).toEqual([]);
-    await expect(fs.access(path.join(paths.agentsSkillsDir, "review"))).rejects.toMatchObject({ code: "ENOENT" });
-  });
-
-  it("names the exposure path when an already-managed artifact's Claude symlink is replaced by something else", async () => {
-    const repo = await makeRepo();
-    const home = await makeTempDir("agent-installer-home-");
-    const paths = resolveTargetPaths(home);
-
-    await installAllFromSource(repo, home);
-
-    const foreignTarget = await makeTempDir("agent-installer-foreign-");
-    await fs.rm(path.join(paths.claudeSkillsDir, "review"), { recursive: true, force: true });
-    await fs.symlink(foreignTarget, path.join(paths.claudeSkillsDir, "review"));
-
-    await expect(installAllFromSource(repo, home)).rejects.toThrow(path.join(paths.claudeSkillsDir, "review"));
-  });
 });
 
 describe("install --only selection", () => {
@@ -461,12 +438,9 @@ describe("install --prune", () => {
     const state = await loadState(paths);
     expect(state.entries.map((entry) => entry.id)).toContain("prompt:commit-message");
     expect(await fs.readFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "utf8")).toContain("commit prompt");
-    expect(await fs.readlink(path.join(paths.claudeCommandsDir, "commit-message.md"))).toBe(
-      path.join(paths.agentsPromptsDir, "commit-message.md")
-    );
   });
 
-  it("removes the base store copy, exposure symlink and state entry for source-missing artifacts with --prune", async () => {
+  it("removes the base store copy and state entry for source-missing artifacts with --prune", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
@@ -480,9 +454,6 @@ describe("install --prune", () => {
     const state = await loadState(paths);
     expect(state.entries.map((entry) => entry.id)).toEqual(["skill:review"]);
     await expect(fs.access(path.join(paths.agentsPromptsDir, "commit-message.md"))).rejects.toMatchObject({
-      code: "ENOENT"
-    });
-    await expect(fs.access(path.join(paths.claudeCommandsDir, "commit-message.md"))).rejects.toMatchObject({
       code: "ENOENT"
     });
   });
@@ -564,7 +535,7 @@ describe("install --prune", () => {
   });
 });
 
-describe("exposure symlink drift", () => {
+describe("artifact status reconciliation", () => {
   it("reports new for artifacts that have never been installed", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-home-");
@@ -572,110 +543,305 @@ describe("exposure symlink drift", () => {
     expect(await statusOf(repo, home, "skill:review")).toBe("new");
     expect(await statusOf(repo, home, "prompt:commit-message")).toBe("new");
   });
+});
 
-  it("reports installed-different when the skill exposure symlink is deleted", async () => {
-    const repo = await makeRepo();
-    const home = await makeTempDir("agent-installer-home-");
-    const paths = resolveTargetPaths(home);
-    await installAllFromSource(repo, home);
+// Simulates a state v2 entry that already migrated to v3 (see tests/state.test.ts for the
+// migration itself): a real, pre-existing Claude symlink recorded as a legacy
+// (targetName: null) exposure, from before this phase stopped creating new ones.
+async function installWithLegacyExposure(repo: string, home: string): Promise<{ paths: ReturnType<typeof resolveTargetPaths>; exposurePath: string }> {
+  await installAllFromSource(repo, home);
+  const paths = resolveTargetPaths(home);
+  const exposurePath = path.join(paths.claudeSkillsDir, "review");
+  await fs.mkdir(paths.claudeSkillsDir, { recursive: true });
+  await fs.symlink(path.join(paths.agentsSkillsDir, "review"), exposurePath);
 
-    await fs.rm(path.join(paths.claudeSkillsDir, "review"), { recursive: true, force: true });
-
-    expect(await statusOf(repo, home, "skill:review")).toBe("installed-different");
+  const state = await loadState(paths);
+  await saveState(paths, {
+    ...state,
+    entries: state.entries.map((entry) =>
+      entry.id === "skill:review" ? { ...entry, exposures: [{ path: exposurePath, targetName: null }] } : entry
+    )
   });
 
-  it("reports installed-different when the prompt exposure symlink is deleted", async () => {
+  return { paths, exposurePath };
+}
+
+describe("legacy exposure preservation", () => {
+  it("removeArtifacts still removes a migrated legacy exposure symlink", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-home-");
-    const paths = resolveTargetPaths(home);
-    await installAllFromSource(repo, home);
+    const { paths, exposurePath } = await installWithLegacyExposure(repo, home);
 
-    await fs.rm(path.join(paths.claudeCommandsDir, "commit-message.md"), { recursive: true, force: true });
+    await removeArtifacts(["skill:review"], home);
 
-    expect(await statusOf(repo, home, "prompt:commit-message")).toBe("installed-different");
+    await expect(fs.access(exposurePath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.access(path.join(paths.agentsSkillsDir, "review"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("recreates the deleted skill exposure symlink on install --all and returns to installed-same", async () => {
+  it("installArtifacts preserves a migrated legacy entry's exposures across a content update", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-home-");
-    const paths = resolveTargetPaths(home);
-    await installAllFromSource(repo, home);
-    await fs.rm(path.join(paths.claudeSkillsDir, "review"), { recursive: true, force: true });
+    const { exposurePath } = await installWithLegacyExposure(repo, home);
 
-    await installAllFromSource(repo, home);
+    await fs.writeFile(path.join(repo, "skills", "review", "SKILL.md"), "# Review v2\n", "utf8");
+    const artifacts = await scanSourceRepository(repo);
+    const { states } = await collectArtifactStates(artifacts, home);
+    expect(states.find((state) => state.id === "skill:review")?.status).toBe("installed-different");
 
-    expect(await fs.readlink(path.join(paths.claudeSkillsDir, "review"))).toBe(path.join(paths.agentsSkillsDir, "review"));
-    expect(await statusOf(repo, home, "skill:review")).toBe("installed-same");
+    await installArtifacts(
+      states.filter((state) => state.status === "installed-different"),
+      home
+    );
+
+    const state = await loadState(resolveTargetPaths(home));
+    const entry = state.entries.find((candidate) => candidate.id === "skill:review");
+    expect(entry?.exposures).toEqual([{ path: exposurePath, targetName: null }]);
+    expect(await fs.readlink(exposurePath)).toBe(entry?.basePath);
   });
+});
 
-  it("recreates the deleted prompt exposure symlink on install --all and returns to installed-same", async () => {
+describe("configured exposure targets", () => {
+  it("creates one exposure symlink per configured target on a fresh install", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
-    await installAllFromSource(repo, home);
-    await fs.rm(path.join(paths.claudeCommandsDir, "commit-message.md"), { recursive: true, force: true });
+    const claudeSkills = path.join(home, "claude-skills");
+    const claudePrompts = path.join(home, "claude-prompts");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n    prompts: ${claudePrompts}\n`);
 
     await installAllFromSource(repo, home);
 
-    expect(await fs.readlink(path.join(paths.claudeCommandsDir, "commit-message.md"))).toBe(
+    expect(await fs.readlink(path.join(claudeSkills, "review"))).toBe(path.join(paths.agentsSkillsDir, "review"));
+    expect(await fs.readlink(path.join(claudePrompts, "commit-message.md"))).toBe(
       path.join(paths.agentsPromptsDir, "commit-message.md")
     );
-    expect(await statusOf(repo, home, "prompt:commit-message")).toBe("installed-same");
+
+    const state = await loadState(paths);
+    const skillEntry = state.entries.find((entry) => entry.id === "skill:review");
+    expect(skillEntry?.exposures).toEqual([{ path: path.join(claudeSkills, "review"), targetName: "claude" }]);
+    const promptEntry = state.entries.find((entry) => entry.id === "prompt:commit-message");
+    expect(promptEntry?.exposures).toEqual([{ path: path.join(claudePrompts, "commit-message.md"), targetName: "claude" }]);
   });
 
-  it("still reports conflict when the skill exposure path is replaced by a regular file", async () => {
+  it("creates one exposure per target/kind combination when multiple targets expose the same artifact", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
+    const claudeSkills = path.join(home, "claude-skills");
+    const claudePrompts = path.join(home, "claude-prompts");
+    const teamSkills = path.join(home, "team-skills");
+    await writeConfigYaml(
+      paths,
+      `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n    prompts: ${claudePrompts}\n  team:\n    skills: ${teamSkills}\n`
+    );
+
     await installAllFromSource(repo, home);
 
-    await fs.rm(path.join(paths.claudeSkillsDir, "review"), { recursive: true, force: true });
-    await fs.writeFile(path.join(paths.claudeSkillsDir, "review"), "user-owned\n", "utf8");
+    const state = await loadState(paths);
+    const skillEntry = state.entries.find((entry) => entry.id === "skill:review");
+    expect(skillEntry?.exposures.map((exposure) => exposure.targetName).sort()).toEqual(["claude", "team"]);
+    expect(await fs.readlink(path.join(teamSkills, "review"))).toBe(skillEntry?.basePath);
 
-    expect(await statusOf(repo, home, "skill:review")).toBe("conflict");
-    expect(await fs.readFile(path.join(paths.claudeSkillsDir, "review"), "utf8")).toBe("user-owned\n");
+    const promptEntry = state.entries.find((entry) => entry.id === "prompt:commit-message");
+    expect(promptEntry?.exposures.map((exposure) => exposure.targetName)).toEqual(["claude"]);
   });
 
-  it("still reports conflict when the prompt exposure path is replaced by a symlink to a foreign target", async () => {
+  it("only touches the selected artifact's exposures across all configured targets with --only", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
+    const claudeSkills = path.join(home, "claude-skills");
+    const claudePrompts = path.join(home, "claude-prompts");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n    prompts: ${claudePrompts}\n`);
     await installAllFromSource(repo, home);
 
-    const foreignTarget = await makeTempDir("agent-installer-foreign-");
-    await fs.rm(path.join(paths.claudeCommandsDir, "commit-message.md"), { recursive: true, force: true });
-    await fs.symlink(foreignTarget, path.join(paths.claudeCommandsDir, "commit-message.md"));
+    // Corrupt the untouched artifact's exposure so any attempt to re-verify or
+    // recreate it during the --only run would be observable.
+    const promptExposure = path.join(claudePrompts, "commit-message.md");
+    await fs.rm(promptExposure);
+    await fs.writeFile(promptExposure, "untouched\n", "utf8");
 
-    expect(await statusOf(repo, home, "prompt:commit-message")).toBe("conflict");
-    expect(await fs.readlink(path.join(paths.claudeCommandsDir, "commit-message.md"))).toBe(foreignTarget);
+    await fs.writeFile(path.join(repo, "skills", "review", "SKILL.md"), "# Review v2\n", "utf8");
+    await installAllFromSource(repo, home, undefined, undefined, { only: ["skill:review"] });
+
+    expect(await fs.readFile(promptExposure, "utf8")).toBe("untouched\n");
+
+    const state = await loadState(paths);
+    const promptEntry = state.entries.find((entry) => entry.id === "prompt:commit-message");
+    expect(promptEntry?.exposures).toEqual([{ path: promptExposure, targetName: "claude" }]);
+    const skillEntry = state.entries.find((entry) => entry.id === "skill:review");
+    expect(await fs.readlink(path.join(claudeSkills, "review"))).toBe(skillEntry?.basePath);
   });
 
-  it("still reports conflict when the skill exposure path is replaced by a symlink to a foreign target", async () => {
+  it("blocks only the conflicting artifact on a basePath conflict, installing the other artifact's exposure normally", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
-    await installAllFromSource(repo, home);
+    const claudeSkills = path.join(home, "claude-skills");
+    await fs.mkdir(paths.agentsPromptsDir, { recursive: true });
+    await fs.writeFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "user-owned\n", "utf8");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n`);
 
-    const foreignTarget = await makeTempDir("agent-installer-foreign-");
-    await fs.rm(path.join(paths.claudeSkillsDir, "review"), { recursive: true, force: true });
-    await fs.symlink(foreignTarget, path.join(paths.claudeSkillsDir, "review"));
+    const { installed, conflicts } = await installAllFromSource(repo, home, undefined, undefined, { allowConflicts: true });
 
-    expect(await statusOf(repo, home, "skill:review")).toBe("conflict");
-    expect(await fs.readlink(path.join(paths.claudeSkillsDir, "review"))).toBe(foreignTarget);
+    expect(conflicts.map((state) => state.id)).toEqual(["prompt:commit-message"]);
+    expect(installed.map((entry) => entry.id)).toEqual(["skill:review"]);
+    expect(await fs.readlink(path.join(claudeSkills, "review"))).toBe(path.join(paths.agentsSkillsDir, "review"));
   });
+});
 
-  it("still reports conflict when the prompt exposure path is replaced by a regular file", async () => {
+describe("exposure target conflicts", () => {
+  it("aborts install --all when an exposure path is unmanaged, naming the artifact and target and installing nothing", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
+    const claudeSkills = path.join(home, "claude-skills");
+    await fs.mkdir(claudeSkills, { recursive: true });
+    await fs.writeFile(path.join(claudeSkills, "review"), "user-owned\n", "utf8");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n`);
+
+    await expect(installAllFromSource(repo, home)).rejects.toThrow(/skill:review/);
+    await expect(installAllFromSource(repo, home)).rejects.toThrow(/claude/);
+
+    const state = await loadState(paths);
+    expect(state.entries).toEqual([]);
+    await expect(fs.access(path.join(paths.agentsSkillsDir, "review"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await fs.readFile(path.join(claudeSkills, "review"), "utf8")).toBe("user-owned\n");
+  });
+
+  it("installs the eligible artifacts and skips only the conflicting exposure pair with --allow-conflicts", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    const claudeSkills = path.join(home, "claude-skills");
+    const claudePrompts = path.join(home, "claude-prompts");
+    await fs.mkdir(claudeSkills, { recursive: true });
+    await fs.writeFile(path.join(claudeSkills, "review"), "user-owned\n", "utf8");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n    prompts: ${claudePrompts}\n`);
+
+    const { installed, conflicts, exposureConflicts } = await installAllFromSource(repo, home, undefined, undefined, {
+      allowConflicts: true
+    });
+
+    expect(conflicts).toEqual([]);
+    expect(exposureConflicts.map((conflict) => `${conflict.id}:${conflict.targetName}`)).toEqual(["skill:review:claude"]);
+    expect(installed.map((entry) => entry.id).sort()).toEqual(["prompt:commit-message", "skill:review"]);
+
+    // The base copy still installs even though its only configured exposure conflicted.
+    expect(await fs.readFile(path.join(paths.agentsSkillsDir, "review", "SKILL.md"), "utf8")).toContain("# Review");
+    // The conflicting path is left untouched.
+    expect(await fs.readFile(path.join(claudeSkills, "review"), "utf8")).toBe("user-owned\n");
+    // The other artifact's exposure at the same target still installs normally.
+    expect(await fs.readlink(path.join(claudePrompts, "commit-message.md"))).toBe(
+      path.join(paths.agentsPromptsDir, "commit-message.md")
+    );
+
+    const state = await loadState(paths);
+    const reviewEntry = state.entries.find((entry) => entry.id === "skill:review");
+    expect(reviewEntry?.exposures).toEqual([]);
+  });
+});
+
+describe("exposure ownership revalidation", () => {
+  it("skips removing an exposure a foreign file has replaced, and retains its record", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    const claudeSkills = path.join(home, "claude-skills");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n`);
+    await installAllFromSource(repo, home, undefined, undefined, { only: ["skill:review"] });
+
+    const exposurePath = path.join(claudeSkills, "review");
+    await fs.rm(exposurePath);
+    await fs.writeFile(exposurePath, "not ours anymore\n", "utf8");
+
+    const { removed, skippedExposures } = await removeArtifacts(["skill:review"], home);
+
+    expect(removed.map((entry) => entry.id)).toEqual(["skill:review"]);
+    expect(skippedExposures).toEqual([{ id: "skill:review", path: exposurePath, targetName: "claude" }]);
+    expect(await fs.readFile(exposurePath, "utf8")).toBe("not ours anymore\n");
+    await expect(fs.access(path.join(paths.agentsSkillsDir, "review"))).rejects.toMatchObject({ code: "ENOENT" });
+
+    const state = await loadState(paths);
+    expect(state.entries.map((entry) => entry.id)).toEqual(["skill:review"]);
+    expect(state.entries[0]?.exposures).toEqual([{ path: exposurePath, targetName: "claude" }]);
+  });
+
+  it("still removes an exposure that was already deleted out from under it, with nothing to report", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    const claudeSkills = path.join(home, "claude-skills");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n`);
+    await installAllFromSource(repo, home, undefined, undefined, { only: ["skill:review"] });
+
+    await fs.rm(path.join(claudeSkills, "review"));
+
+    const { removed, skippedExposures } = await removeArtifacts(["skill:review"], home);
+
+    expect(removed.map((entry) => entry.id)).toEqual(["skill:review"]);
+    expect(skippedExposures).toEqual([]);
+
+    const state = await loadState(paths);
+    expect(state.entries).toEqual([]);
+  });
+
+  it("revalidates ownership before pruning a source-missing artifact's exposure", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    const claudePrompts = path.join(home, "claude-prompts");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    prompts: ${claudePrompts}\n`);
     await installAllFromSource(repo, home);
 
-    await fs.rm(path.join(paths.claudeCommandsDir, "commit-message.md"), { recursive: true, force: true });
-    await fs.writeFile(path.join(paths.claudeCommandsDir, "commit-message.md"), "user-owned\n", "utf8");
+    const exposurePath = path.join(claudePrompts, "commit-message.md");
+    await fs.rm(exposurePath);
+    await fs.writeFile(exposurePath, "not ours anymore\n", "utf8");
+    await fs.rm(path.join(repo, "prompts", "commit-message.md"));
 
-    expect(await statusOf(repo, home, "prompt:commit-message")).toBe("conflict");
-    expect(await fs.readFile(path.join(paths.claudeCommandsDir, "commit-message.md"), "utf8")).toBe("user-owned\n");
+    const { pruned, prunedSkippedExposures } = await installAllFromSource(repo, home, undefined, undefined, { prune: true });
+
+    expect(pruned.map((entry) => entry.id)).toEqual(["prompt:commit-message"]);
+    expect(prunedSkippedExposures).toEqual([{ id: "prompt:commit-message", path: exposurePath, targetName: "claude" }]);
+    expect(await fs.readFile(exposurePath, "utf8")).toBe("not ours anymore\n");
+
+    const state = await loadState(paths);
+    const entry = state.entries.find((candidate) => candidate.id === "prompt:commit-message");
+    expect(entry?.exposures).toEqual([{ path: exposurePath, targetName: "claude" }]);
   });
+});
+
+describe("multi-target install partial failure", () => {
+  it.skipIf(process.getuid !== undefined && process.getuid() === 0)(
+    "keeps a successfully created exposure when another target's symlink creation fails, with no rollback",
+    async () => {
+      const repo = await makeRepo();
+      const home = await makeTempDir("agent-installer-home-");
+      const paths = resolveTargetPaths(home);
+      const goodSkills = path.join(home, "good-skills");
+      const restrictedSkills = path.join(await makeTempDir("agent-installer-restricted-"), "skills");
+      await fs.mkdir(restrictedSkills, { recursive: true });
+      await writeConfigYaml(
+        paths,
+        `version: 1\ntargets:\n  good:\n    skills: ${goodSkills}\n  restricted:\n    skills: ${restrictedSkills}\n`
+      );
+
+      await fs.chmod(restrictedSkills, 0o500);
+      try {
+        const { installed } = await installAllFromSource(repo, home, undefined, undefined, { only: ["skill:review"] });
+
+        expect(installed.map((entry) => entry.id)).toEqual(["skill:review"]);
+        expect(await fs.readlink(path.join(goodSkills, "review"))).toBe(path.join(paths.agentsSkillsDir, "review"));
+        await expect(fs.access(path.join(restrictedSkills, "review"))).rejects.toMatchObject({ code: "ENOENT" });
+
+        const state = await loadState(paths);
+        const entry = state.entries.find((candidate) => candidate.id === "skill:review");
+        expect(entry?.exposures.map((exposure) => exposure.targetName)).toEqual(["good"]);
+      } finally {
+        await fs.chmod(restrictedSkills, 0o700);
+      }
+    }
+  );
 });
 
 describe("codex invocation policy translation", () => {

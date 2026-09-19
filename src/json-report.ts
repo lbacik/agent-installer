@@ -1,5 +1,5 @@
 import { readSymlinkTarget } from "./install.js";
-import type { ArtifactState, ArtifactStatus, ManagedEntry, RemovedArtifactState } from "./types.js";
+import type { ArtifactState, ArtifactStatus, ExposureRecord, ManagedEntry, RemovedArtifactState } from "./types.js";
 
 export const JSON_SCHEMA_VERSION = 1 as const;
 
@@ -11,7 +11,12 @@ export interface JsonArtifactRecord {
   sourceIdentity: string;
   relativeSourcePath: string;
   basePath: string;
-  exposurePath: string;
+  /**
+   * The first owned exposure's path, or `null` when the artifact has none (the
+   * common case until a configuration module exists). Superseded by a full
+   * `exposures[]` array in a later schema version.
+   */
+  exposurePath: string | null;
   sourceHash: string;
   installedHash: string | null;
   requestedRef?: string;
@@ -48,6 +53,10 @@ function provenanceFields(source: { requestedRef?: string | undefined; resolvedC
   };
 }
 
+function firstExposurePath(exposures: ExposureRecord[]): string | null {
+  return exposures[0]?.path ?? null;
+}
+
 export function artifactStateToJson(state: ArtifactState): JsonArtifactRecord {
   return {
     id: state.id,
@@ -57,7 +66,7 @@ export function artifactStateToJson(state: ArtifactState): JsonArtifactRecord {
     sourceIdentity: state.artifact.sourceRoot,
     relativeSourcePath: state.artifact.relativeSourcePath,
     basePath: state.basePath,
-    exposurePath: state.exposurePath,
+    exposurePath: state.managedEntry === null ? null : firstExposurePath(state.managedEntry.exposures),
     sourceHash: state.sourceHash,
     installedHash: state.installedHash,
     ...provenanceFields(state.artifact),
@@ -76,7 +85,7 @@ export function removedArtifactStateToJson(state: RemovedArtifactState): JsonArt
     sourceIdentity: entry.sourceRoot,
     relativeSourcePath: entry.relativeSourcePath,
     basePath: state.basePath,
-    exposurePath: state.exposurePath,
+    exposurePath: firstExposurePath(entry.exposures),
     sourceHash: entry.sourceHash,
     installedHash: entry.installedHash,
     ...provenanceFields(entry)
@@ -85,13 +94,15 @@ export function removedArtifactStateToJson(state: RemovedArtifactState): JsonArt
 
 // `list` never re-scans the original source, so content drift can only be judged
 // against the installer's own recorded hashes, not against the source repository's
-// current content. The exposure symlink, however, is local state `list` can check
+// current content. Owned exposure symlinks, however, are local state `list` can check
 // directly, so a broken or missing exposure still reconciles as installed-different
-// here rather than being reported as installed-same.
+// here rather than being reported as installed-same. An entry with no owned exposures
+// (the common case until a configuration module exists) has nothing to check here.
 export async function managedEntryToJson(entry: ManagedEntry): Promise<JsonArtifactRecord> {
   const contentMatches = entry.sourceHash === entry.installedHash;
-  const exposureTarget = await readSymlinkTarget(entry.exposurePath);
-  const exposureMatches = exposureTarget === entry.basePath;
+  const exposureMatches = (
+    await Promise.all(entry.exposures.map(async (exposure) => (await readSymlinkTarget(exposure.path)) === entry.basePath))
+  ).every(Boolean);
 
   return {
     id: entry.id,
@@ -101,7 +112,7 @@ export async function managedEntryToJson(entry: ManagedEntry): Promise<JsonArtif
     sourceIdentity: entry.sourceRoot,
     relativeSourcePath: entry.relativeSourcePath,
     basePath: entry.basePath,
-    exposurePath: entry.exposurePath,
+    exposurePath: firstExposurePath(entry.exposures),
     sourceHash: entry.sourceHash,
     installedHash: entry.installedHash,
     ...provenanceFields(entry)

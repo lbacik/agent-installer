@@ -232,19 +232,17 @@ describe("list --json", () => {
     expect(parsed.artifacts.every((artifact) => artifact.status === "installed-same")).toBe(true);
   });
 
-  it("reports installed-different for a managed entry whose Claude exposure symlink was removed", async () => {
+  it("reports installed-same for a freshly installed entry, which owns no exposure yet", async () => {
     const repo = await makeRepo();
     const home = await makeTempDir("agent-installer-cli-home-");
     await runCli(["install", repo, "--all"], home);
-    await fs.rm(path.join(home, ".claude", "skills", "review"), { recursive: true, force: true });
 
     const result = await runCli(["list", "--json"], home);
 
     expect(result.exitCode).toBe(0);
-    const parsed = parseStdoutJson(result.stdout) as { artifacts: Array<{ id: string; status: string }> };
+    const parsed = parseStdoutJson(result.stdout) as { artifacts: Array<{ id: string; status: string; exposurePath: unknown }> };
     const review = parsed.artifacts.find((artifact) => artifact.id === "skill:review");
-    expect(review?.status).toBe("installed-different");
-    const prompt = parsed.artifacts.find((artifact) => artifact.id === "prompt:commit-message");
-    expect(prompt?.status).toBe("installed-same");
+    expect(review?.status).toBe("installed-same");
+    expect(review?.exposurePath).toBeNull();
   });
 });
