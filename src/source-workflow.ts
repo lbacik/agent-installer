@@ -1,4 +1,6 @@
+import { loadConfig } from "./config.js";
 import { collectArtifactStates } from "./install.js";
+import { resolveTargetPaths } from "./paths.js";
 import { scanSourceRepository, type ScanSourceOptions } from "./source.js";
 import { resolveSourceInput, type ResolveSourceOptions } from "./source-resolver.js";
 import type { ArtifactState, RemovedArtifactState } from "./types.js";
@@ -16,6 +18,9 @@ export async function withResolvedArtifactStates<T>(
   resolveOptions: ResolveSourceOptions | undefined,
   callback: (result: ResolvedArtifactStates) => Promise<T>
 ): Promise<T> {
+  // Validated before touching the source, so a malformed config.yaml aborts before a
+  // remote source is cloned rather than after paying for the clone.
+  await loadConfig(resolveTargetPaths(home), home);
   const source = await resolveSourceInput(inputPath, resolveOptions);
 
   try {

@@ -58,9 +58,10 @@ Claude exposure paths:
 - `~/.claude/skills/<name>` -> symlink to `~/.agents/skills/<name>`
 - `~/.claude/commands/<name>.md` -> symlink to `~/.agents/prompts/<name>.md`
 
-State and ownership metadata:
+State, configuration, and ownership metadata:
 
 - state file: `~/.agents/agent-installer/state.json`
+- configuration file: `~/.agents/agent-installer/config.yaml` (optional; `version: 1` plus named `targets: { name: { skills?, prompts? } }`, strictly validated by [src/config.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/config.ts:1)). No `config.yaml` means base-store-only installation. A malformed file aborts every config-aware command (`scan`, `list`, `install`, `uninstall`, interactive mode) at startup, naming the file and the problem. `agent-installer config init` creates it interactively.
 - marker files:
   - skill: `<basePath>/.agent-installer.json`
   - prompt: `<basePath>.agent-installer.json`
@@ -100,6 +101,11 @@ Implemented commands:
   - removes managed artifacts by id, for example `skill:review`
 - `agent-installer list`
   - prints managed entries from state
+- `agent-installer config init`
+  - interactively creates `~/.agents/agent-installer/config.yaml` with one or more named exposure targets
+  - offers a "claude" preset prefilled with `~/.claude/skills` / `~/.claude/commands`, or a detected legacy
+    exposure directory when one exists
+  - refuses to overwrite an existing `config.yaml` unless confirmed or run with `--force`
 
 ## Status Model
 
@@ -121,7 +127,7 @@ Meaning:
 
 Reconciliation has no status for an unusable source. A skill whose Claude frontmatter enables the Codex invocation-policy translation but whose authored `agents/openai.yaml` cannot be parsed aborts the whole run, including `scan`, with a source-configuration error, so no managed artifact is created or changed from an ambiguous configuration.
 
-**In progress:** as of the "configurable multi-target tool exposure" work (issue #38 and its phased children), `install` no longer creates a Claude exposure symlink for newly installed artifacts, and status above is reconciled purely from base-store content until a configuration module and per-target install granularity land (later phases). Only artifacts with a real, previously migrated exposure record still have it checked and removed on `uninstall`/`prune`. This paragraph and the bullets above will be reconciled once that work completes.
+**In progress:** as of the "configurable multi-target tool exposure" work (issue #38 and its phased children), `install` no longer creates a Claude exposure symlink for newly installed artifacts, and status above is reconciled purely from base-store content. The `config.yaml` schema, validation, and `config init` have landed ([src/config.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/config.ts:1)), but nothing yet reads it to create or reconcile exposure symlinks -- that lands with per-target install granularity and the `sync` command (later phases). Only artifacts with a real, previously migrated exposure record still have it checked and removed on `uninstall`/`prune`. This paragraph and the bullets above will be reconciled once that work completes.
 
 ## Important Invariants
 
@@ -142,6 +148,8 @@ Reconciliation has no status for an unusable source. A skill whose Claude frontm
 - [src/hash.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/hash.ts:1): content hashing, including the materialized overlay used for expected source hashes
 - [src/skill-invocation-policy.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/skill-invocation-policy.ts:1): Claude-to-Codex invocation policy translation
 - [src/interactive.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/interactive.ts:1): interactive selection UI
+- [src/config.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/config.ts:1): `config.yaml` schema, loading, and path validation
+- [src/config-init.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/config-init.ts:1): interactive `config init` flow
 
 ## Working Rules
 
@@ -169,6 +177,7 @@ Key tests live in:
 
 - [tests/scanner.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/scanner.test.ts:1)
 - [tests/install.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/install.test.ts:1)
+- [tests/config.test.ts](/Volumes/Sources/js/ts/ai-skill-installer/tests/config.test.ts:1)
 
 ## Release
 

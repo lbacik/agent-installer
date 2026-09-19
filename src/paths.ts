@@ -10,11 +10,19 @@ export interface TargetPaths {
   claudeCommandsDir: string;
   stateDir: string;
   stateFile: string;
+  configFile: string;
 }
 
-export function resolveTargetPaths(home = process.env.HOME ?? path.join(process.cwd(), ".home")): TargetPaths {
-  const agentsRoot = path.join(home, ".agents");
-  const claudeRoot = path.join(home, ".claude");
+// The same redirected-HOME default `resolveTargetPaths` has always used (ADR 0003),
+// shared so anything resolving `~/`-prefixed paths (config.ts) stays consistent with it.
+export function resolveHome(home = process.env.HOME ?? path.join(process.cwd(), ".home")): string {
+  return home;
+}
+
+export function resolveTargetPaths(home?: string): TargetPaths {
+  const resolvedHome = resolveHome(home);
+  const agentsRoot = path.join(resolvedHome, ".agents");
+  const claudeRoot = path.join(resolvedHome, ".claude");
   const stateDir = path.join(agentsRoot, "agent-installer");
 
   return {
@@ -25,7 +33,8 @@ export function resolveTargetPaths(home = process.env.HOME ?? path.join(process.
     claudeSkillsDir: path.join(claudeRoot, "skills"),
     claudeCommandsDir: path.join(claudeRoot, "commands"),
     stateDir,
-    stateFile: path.join(stateDir, "state.json")
+    stateFile: path.join(stateDir, "state.json"),
+    configFile: path.join(stateDir, "config.yaml")
   };
 }
 
