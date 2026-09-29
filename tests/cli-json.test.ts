@@ -463,6 +463,7 @@ describe("sync --json", () => {
 });
 
 const REMOTE_URL = "https://git.example.test/owner/skills";
+const GIT_IDENTITY = ["-c", "user.name=Test", "-c", "user.email=test@example.test"];
 
 async function git(args: string[], cwd: string): Promise<string> {
   const { stdout } = await execFileAsync("git", args, { cwd });
@@ -474,15 +475,14 @@ async function git(args: string[], cwd: string): Promise<string> {
  * variables that make `git` resolve REMOTE_URL to it, so the CLI exercises its
  * real HTTPS clone/fetch path without network access.
  */
-async function makeRemoteRepo(): Promise<{ env: NodeJS.ProcessEnv; firstCommit: string; secondCommit: string }> {
+async function makeRemoteRepo(): Promise<{ env: NodeJS.ProcessEnv; firstCommit: string }> {
   const repo = await makeRepo();
   await git(["init", "--quiet", "--initial-branch", "main"], repo);
   await git(["add", "."], repo);
-  await git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--quiet", "-m", "first"], repo);
+  await git([...GIT_IDENTITY, "commit", "--quiet", "-m", "first"], repo);
   const firstCommit = await git(["rev-parse", "HEAD"], repo);
   await fs.writeFile(path.join(repo, "skills", "review", "SKILL.md"), "# Review v2\n", "utf8");
-  await git(["-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--quiet", "-am", "second"], repo);
-  const secondCommit = await git(["rev-parse", "HEAD"], repo);
+  await git([...GIT_IDENTITY, "commit", "--quiet", "-am", "second"], repo);
 
   return {
     env: {
@@ -492,8 +492,7 @@ async function makeRemoteRepo(): Promise<{ env: NodeJS.ProcessEnv; firstCommit: 
       GIT_CONFIG_KEY_1: "protocol.file.allow",
       GIT_CONFIG_VALUE_1: "always"
     },
-    firstCommit,
-    secondCommit
+    firstCommit
   };
 }
 
@@ -550,8 +549,29 @@ describe("--ref on subcommands", () => {
     const install = await runCli(["--ref", remote.firstCommit, "install", REMOTE_URL, "--all"], home, remote.env);
 
     expect(install.exitCode).not.toBe(0);
-    expect(install.stderr).toMatch(/--ref must follow the subcommand name/);
+    expect(install.stderr).toMatch(/--ref cannot precede the install subcommand; place --ref after the subcommand name/);
     await expect(fs.access(path.join(home, ".agents", "skills", "review"))).rejects.toThrow();
+  });
+});
+
+describe("root options before a subcommand", () => {
+  it("are rejected without suggesting a flag the subcommand does not accept", async () => {
+    const home = await makeTempDir("agent-installer-cli-home-");
+
+    const result = await runCli(["--ref", "main", "list", "--json"], home);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toMatch(/--ref cannot precede the list subcommand/);
+    expect(result.stderr).not.toMatch(/agent-installer list --ref/);
+  });
+
+  it("reject --list-length ahead of list instead of silently ignoring it", async () => {
+    const home = await makeTempDir("agent-installer-cli-home-");
+
+    const result = await runCli(["--list-length", "3", "list", "--json"], home);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toMatch(/--list-length cannot precede the list subcommand/);
   });
 });
 

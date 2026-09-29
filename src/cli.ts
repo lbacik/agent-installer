@@ -163,19 +163,23 @@ function createProgram(): Command {
       await runInteractive(inputPath, scanOptionsFromCommand(options), options.listLength, options.ref);
     });
 
-  // Root-level source options only configure interactive mode; reject them ahead of a subcommand instead of
-  // dropping them silently.
+  // Root-level options only configure interactive mode; reject them ahead of a subcommand instead of dropping
+  // them silently.
   program.hook("preSubcommand", (thisCommand, subcommand) => {
-    const rootOptions = thisCommand.opts<ScanCommandOptions>();
-    const misplaced = [
-      ...(rootOptions.ref === undefined ? [] : ["--ref"]),
-      ...(rootOptions.skillMaxDepth === undefined ? [] : ["--skill-max-depth"])
-    ];
-    if (misplaced.length > 0) {
-      thisCommand.error(
-        `error: ${misplaced.join(" and ")} must follow the subcommand name, for example: agent-installer ${subcommand.name()} ${misplaced[0]} <value>`
-      );
+    const misplaced = thisCommand.options.filter(
+      (option) => thisCommand.getOptionValueSource(option.attributeName()) === "cli"
+    );
+    if (misplaced.length === 0) {
+      return;
     }
+
+    const flags = misplaced.map((option) => option.long ?? option.flags);
+    const accepted = flags.filter((flag) => subcommand.options.some((option) => option.long === flag));
+    const hint =
+      accepted.length > 0
+        ? `; place ${accepted.join(" and ")} after the subcommand name, for example: agent-installer ${subcommand.name()} ${accepted[0]} <value>`
+        : "";
+    thisCommand.error(`error: ${flags.join(" and ")} cannot precede the ${subcommand.name()} subcommand${hint}`);
   });
 
   addJsonOption(
