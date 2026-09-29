@@ -18,10 +18,10 @@ interface CliResult {
   exitCode: number;
 }
 
-async function runCli(args: string[], home: string): Promise<CliResult> {
+async function runCli(args: string[], home: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<CliResult> {
   try {
     const { stdout, stderr } = await execFileAsync(TSX_BIN, [CLI_ENTRY, ...args], {
-      env: { ...process.env, HOME: home }
+      env: { ...process.env, HOME: home, ...extraEnv }
     });
     return { stdout, stderr, exitCode: 0 };
   } catch (error) {
@@ -459,5 +459,135 @@ describe("sync --json", () => {
     expect(await fs.readlink(path.join(promptsDir, "commit-message.md"))).toBe(
       path.join(home, ".agents", "prompts", "commit-message.md")
     );
+  });
+});
+
+const REMOTE_URL = "https://git.example.test/owner/skills";
+const GIT_IDENTITY = ["-c", "user.name=Test", "-c", "user.email=test@example.test"];
+
+async function git(args: string[], cwd: string): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, { cwd });
+  return stdout.trim();
+}
+
+/**
+ * Builds a local Git repository with two commits and returns environment
+ * variables that make `git` resolve REMOTE_URL to it, so the CLI exercises its
+ * real HTTPS clone/fetch path without network access.
+ */
+async function makeRemoteRepo(): Promise<{ env: NodeJS.ProcessEnv; firstCommit: string }> {
+  const repo = await makeRepo();
+  await git(["init", "--quiet", "--initial-branch", "main"], repo);
+  await git(["add", "."], repo);
+  await git([...GIT_IDENTITY, "commit", "--quiet", "-m", "first"], repo);
+  const firstCommit = await git(["rev-parse", "HEAD"], repo);
+  await fs.writeFile(path.join(repo, "skills", "review", "SKILL.md"), "# Review v2\n", "utf8");
+  await git([...GIT_IDENTITY, "commit", "--quiet", "-am", "second"], repo);
+
+  return {
+    env: {
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: `url.file://${repo}.insteadOf`,
+      GIT_CONFIG_VALUE_0: REMOTE_URL,
+      GIT_CONFIG_KEY_1: "protocol.file.allow",
+      GIT_CONFIG_VALUE_1: "always"
+    },
+    firstCommit
+  };
+}
+
+describe("--ref on subcommands", () => {
+  it("install --ref checks out the requested commit instead of the default branch HEAD", async () => {
+    const remote = await makeRemoteRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+
+    const install = await runCli(["install", REMOTE_URL, "--ref", remote.firstCommit, "--only", "skill:review"], home, remote.env);
+
+    expect(install.stderr).toBe("");
+    expect(install.exitCode).toBe(0);
+    const listed = parseStdoutJson((await runCli(["list", "--json"], home)).stdout) as {
+      artifacts: Array<{ id: string; requestedRef?: string; resolvedCommit?: string }>;
+    };
+    expect(listed.artifacts).toEqual([
+      expect.objectContaining({ id: "skill:review", requestedRef: remote.firstCommit, resolvedCommit: remote.firstCommit })
+    ]);
+    expect(await fs.readFile(path.join(home, ".agents", "skills", "review", "SKILL.md"), "utf8")).toBe("# Review\n");
+  });
+
+  it("scan --ref scans the requested commit instead of the default branch HEAD", async () => {
+    const remote = await makeRemoteRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+
+    const scan = await runCli(["scan", REMOTE_URL, "--ref", remote.firstCommit, "--json"], home, remote.env);
+
+    expect(scan.exitCode).toBe(0);
+    const parsed = parseStdoutJson(scan.stdout) as {
+      artifacts: Array<{ id: string; requestedRef?: string; resolvedCommit?: string }>;
+    };
+    expect(parsed.artifacts.length).toBeGreaterThan(0);
+    for (const artifact of parsed.artifacts) {
+      expect(artifact).toEqual(
+        expect.objectContaining({ requestedRef: remote.firstCommit, resolvedCommit: remote.firstCommit })
+      );
+    }
+  });
+
+  it("scan --ref on a local source is rejected instead of silently ignored", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+
+    const scan = await runCli(["scan", repo, "--ref", "main"], home);
+
+    expect(scan.exitCode).not.toBe(0);
+    expect(scan.stderr).toMatch(/--ref can only be used with an HTTPS Git source/);
+  });
+
+  it("rejects --ref placed before the subcommand name instead of silently dropping it", async () => {
+    const remote = await makeRemoteRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+
+    const install = await runCli(["--ref", remote.firstCommit, "install", REMOTE_URL, "--all"], home, remote.env);
+
+    expect(install.exitCode).not.toBe(0);
+    expect(install.stderr).toMatch(/--ref cannot precede the install subcommand; place --ref after the subcommand name/);
+    await expect(fs.access(path.join(home, ".agents", "skills", "review"))).rejects.toThrow();
+  });
+});
+
+describe("root options before a subcommand", () => {
+  it("are rejected without suggesting a flag the subcommand does not accept", async () => {
+    const home = await makeTempDir("agent-installer-cli-home-");
+
+    const result = await runCli(["--ref", "main", "list", "--json"], home);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toMatch(/--ref cannot precede the list subcommand/);
+    expect(result.stderr).not.toMatch(/agent-installer list --ref/);
+  });
+
+  it("reject --list-length ahead of list instead of silently ignoring it", async () => {
+    const home = await makeTempDir("agent-installer-cli-home-");
+
+    const result = await runCli(["--list-length", "3", "list", "--json"], home);
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toMatch(/--list-length cannot precede the list subcommand/);
+  });
+});
+
+describe("--skill-max-depth on subcommands", () => {
+  it("is applied by scan when given after the subcommand name", async () => {
+    const repo = await makeTempDir("agent-installer-cli-repo-");
+    await fs.mkdir(path.join(repo, "skills", "one", "two", "three", "deep-skill"), { recursive: true });
+    await fs.writeFile(path.join(repo, "skills", "one", "two", "three", "deep-skill", "SKILL.md"), "# Deep\n", "utf8");
+    const home = await makeTempDir("agent-installer-cli-home-");
+
+    const shallow = await runCli(["scan", repo, "--json"], home);
+    const deep = await runCli(["scan", repo, "--skill-max-depth", "4", "--json"], home);
+
+    const ids = (result: CliResult) =>
+      (parseStdoutJson(result.stdout) as { artifacts: Array<{ id: string }> }).artifacts.map((artifact) => artifact.id);
+    expect(ids(shallow)).toEqual([]);
+    expect(ids(deep)).toEqual(["skill:deep-skill"]);
   });
 });
