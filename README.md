@@ -207,6 +207,9 @@ Show scan results for a remote tag, branch, or commit:
 agent-installer scan https://github.com/org/agents.git --ref v1.2.0
 ```
 
+Options such as `--ref` and `--skill-max-depth` belong after the subcommand name. An option placed before a
+subcommand (`agent-installer --ref v1.2.0 scan ...`) is rejected with an error rather than silently ignored.
+
 Scan deeper nested skill catalogs:
 
 ```bash
