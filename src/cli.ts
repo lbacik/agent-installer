@@ -145,6 +145,10 @@ async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOption
 
 function createProgram(): Command {
   const program = new Command();
+  // The root command and the scan/install subcommands share --ref and --skill-max-depth. Without positional
+  // options, Commander hands a shared option to the root even when it follows the subcommand name, so the
+  // subcommand would silently run without it.
+  program.enablePositionalOptions();
   addRefOption(addSkillMaxDepthOption(program))
     .name("agent-installer")
     .description("Install Codex skills and Claude Code skills and commands from a local or HTTPS Git repository.")
@@ -158,6 +162,21 @@ function createProgram(): Command {
     .action(async (inputPath, options: InteractiveCommandOptions) => {
       await runInteractive(inputPath, scanOptionsFromCommand(options), options.listLength, options.ref);
     });
+
+  // Root-level source options only configure interactive mode; reject them ahead of a subcommand instead of
+  // dropping them silently.
+  program.hook("preSubcommand", (thisCommand, subcommand) => {
+    const rootOptions = thisCommand.opts<ScanCommandOptions>();
+    const misplaced = [
+      ...(rootOptions.ref === undefined ? [] : ["--ref"]),
+      ...(rootOptions.skillMaxDepth === undefined ? [] : ["--skill-max-depth"])
+    ];
+    if (misplaced.length > 0) {
+      thisCommand.error(
+        `error: ${misplaced.join(" and ")} must follow the subcommand name, for example: agent-installer ${subcommand.name()} ${misplaced[0]} <value>`
+      );
+    }
+  });
 
   addJsonOption(
     addRefOption(addSkillMaxDepthOption(program.command("scan"))),
