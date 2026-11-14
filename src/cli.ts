@@ -508,16 +508,16 @@ function createProgram(): Command {
       }
     });
 
-  program
-    .command("sync")
-    .description("Reconcile installed artifacts' exposures against the current config.yaml, without touching sources or content.")
-    .option("--only <artifact-id>", "Sync only this artifact id, for example skill:review (repeatable)", collectOnly, [])
-    .option("--target <name>", "Sync only this config.yaml target name (repeatable)", collectOnly, [])
-    .option("--allow-conflicts", "Sync the eligible pairs and skip conflicting ones instead of aborting")
-    .option("--dry-run", "Print the planned actions without touching the filesystem or state")
-    .option("--json", "Emit a machine-readable JSON report on stdout instead of human-readable output")
-    .option("--json-schema <schema>", "JSON report schema version (2 or 3; 3 is install-only)")
-    .action(
+  addJsonSchemaOption(
+    program
+      .command("sync")
+      .description("Reconcile installed artifacts' exposures against the current config.yaml, without touching sources or content.")
+      .option("--only <artifact-id>", "Sync only this artifact id, for example skill:review (repeatable)", collectOnly, [])
+      .option("--target <name>", "Sync only this config.yaml target name (repeatable)", collectOnly, [])
+      .option("--allow-conflicts", "Sync the eligible pairs and skip conflicting ones instead of aborting")
+      .option("--dry-run", "Print the planned actions without touching the filesystem or state")
+      .option("--json", "Emit a machine-readable JSON report on stdout instead of human-readable output")
+  ).action(
       async (options: { only: string[]; target: string[]; allowConflicts?: boolean; dryRun?: boolean; json?: boolean; jsonSchema?: string }) => {
         const json = options.json === true;
         // Usage errors fail before any work starts, outside the JSON error wrapping below.

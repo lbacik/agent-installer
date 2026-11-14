@@ -88,7 +88,9 @@ export class UnmatchedSelectorsError extends Error {
 
 function partitionSelectors(states: ArtifactState[], only: string[]): { matched: ArtifactState[]; unmatched: string[] } {
   const byId = new Map(states.map((state) => [state.id, state]));
-  const unmatched = [...new Set(only.filter((id) => !byId.has(id)))];
+  // Unmatched selectors are reported exactly as given (order and duplicates
+  // preserved); only the matched side is deduped so each artifact installs once.
+  const unmatched = only.filter((id) => !byId.has(id));
   const matched = [...new Set(only)].filter((id) => byId.has(id)).map((id) => byId.get(id) as ArtifactState);
   return { matched, unmatched };
 }
@@ -124,13 +126,8 @@ export function exposureKindOf(kind: ArtifactKind): ExposureKind {
 }
 
 /** Base-store-relative location: the skill name, or `<name>.md` for a prompt. */
-export function getStoreRelativePath(
-  paths: TargetPaths,
-  artifact: Pick<DiscoveredArtifact, "kind" | "name">
-): string {
-  const dir = artifact.kind === "skill" ? paths.agentsSkillsDir : paths.agentsPromptsDir;
-  const entryName = artifact.kind === "skill" ? artifact.name : `${artifact.name}.md`;
-  return path.relative(dir, path.join(dir, entryName));
+export function getStoreRelativePath(artifact: Pick<DiscoveredArtifact, "kind" | "name">): string {
+  return artifact.kind === "skill" ? artifact.name : `${artifact.name}.md`;
 }
 
 export function overlayToRecord(overlay: OverlayFile): OverlayRecord {
@@ -846,7 +843,7 @@ function baseOutcomeRecord(
     disposition,
     exposures: [],
     basePath: state.basePath,
-    storeRelativePath: getStoreRelativePath(paths, state.artifact),
+    storeRelativePath: getStoreRelativePath(state.artifact),
     requestedRef: nullProvenance(state.artifact.requestedRef),
     resolvedCommit: nullProvenance(state.artifact.resolvedCommit),
     overlays: []
@@ -1182,7 +1179,7 @@ export async function runInstall(request: InstallRequest): Promise<InstallAllRes
         return {
           id: entry.id,
           basePath: entry.basePath,
-          storeRelativePath: getStoreRelativePath(paths, entry),
+          storeRelativePath: getStoreRelativePath(entry),
           requestedRef: nullProvenance(entry.managedEntry.requestedRef),
           resolvedCommit: nullProvenance(entry.managedEntry.resolvedCommit),
           removedExposures: entry.managedEntry.exposures

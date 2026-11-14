@@ -384,8 +384,8 @@ repository.
 unchanged). Schema selection is explicit and validated before any work starts: `--json-schema` without `--json`,
 any value but `2` or `3`, and `--json-schema 3` on `scan`, `list`, or `sync` all fail with a usage error and change
 nothing. A v3 report carries `schemaVersion: 3` and `kind: "agent-installer.install-report"`, and records exactly
-one verified outcome per requested artifact — every discovered artifact under `--all`, or exactly the artifacts
-matched by `--only` — on success and on every failure path:
+one verified outcome per requested artifact -- every discovered artifact under `--all`, or exactly the artifacts
+matched by `--only` -- on success and on every failure path:
 
 ```json
 {
@@ -416,20 +416,20 @@ Each record carries `id`, `kind`, `name`, the sanitized Source Identity, `relati
 creating an exposure never changes the disposition. `basePath` is absolute and `storeRelativePath` is relative to
 the kind's Base Store root; `requestedRef` and `resolvedCommit` are always present (`null` for local sources) and
 come from this run's checkout. `content` holds the freshly verified Content Identity (`algorithm`, `expectedHash`,
-`installedHash`) whenever the Base Store copy exists after the run — see `docs/content-identity.md` for the hash
+`installedHash`) whenever the Base Store copy exists after the run -- see `docs/content-identity.md` for the hash
 encodings, the `files[]` inventory rules, and the Overlay registry. `expectedHash` covers the source files plus any
 installer overlays and must never be presented as a pristine upstream-tree hash. A `failed` record carries
 `failure: {code, message}`.
 
 `outcome` is computed from Base Store dispositions only: `complete` (every requested artifact installed, updated,
 or unchanged), `partial` (`--allow-conflicts` skipped one or more artifacts), or `aborted` (strict conflict
-refusal, unmatched selector, source failure, or a failure partway through — the report still discloses every
+refusal, unmatched selector, source failure, or a failure partway through -- the report still discloses every
 artifact already written with its real disposition, the failing one as `failed`, and the rest as `not-attempted`).
 `exposureOutcome` is independent: `not-configured` (no target declares any requested artifact's kind), `complete`,
 or `partial`. Whenever `outcome` is `aborted` the report carries `error: {code, message}` with a code from the
 closed set `source-unavailable`, `source-configuration`, `config-invalid`, `conflict`, `unmatched-selector`,
 `install-failed`, `verification-failed`. Exit codes are unchanged for every flag combination: `--allow-conflicts`
-with skips still exits 0 — consumers read `outcome`, not the exit code. Artifacts removed by `--prune` appear only
+with skips still exits 0 -- consumers read `outcome`, not the exit code. Artifacts removed by `--prune` appear only
 in `pruned[]` (with `removedExposures[]`/`retainedExposures[]`), never among the requested records.
 
 `list --json` reports the currently managed entries without re-scanning the source repository, so `status` reflects

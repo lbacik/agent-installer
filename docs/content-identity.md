@@ -12,7 +12,7 @@ overlays alongside the hashes.
 
 Hashes of different algorithms are never compared with each other. A skill entry migrated from state v3 is labelled
 `agent-installer-tree-v1` (the pre-framing encoding) until the next install writes or refreshes it, and `list`
-compares an entry's own two stored hashes — which always share one algorithm — so a migrated entry never reports
+compares an entry's own two stored hashes -- which always share one algorithm -- so a migrated entry never reports
 drift merely because its algorithm label changed. Reconciliation itself recomputes both the expected and the
 installed identities with the current algorithm on every run, so no reinstall is forced by the encoding change.
 
@@ -47,7 +47,7 @@ framing, so the trees `{a: "Xb\n-\nY"}` and `{a: "X", b: "Y"}` hashed identicall
 `files[]` is a complete inventory of the Base Store copy's regular content files, produced by the same fresh walk as
 the digest, so the inventory and `installedHash` always describe the same bytes. Each entry carries `path` (the
 `/`-separated path relative to the artifact root; a prompt has a single entry, the file name), `sha256` over the raw
-file bytes, and `executable`. Entries sort by UTF-8 byte order of `path` — byte order, not UTF-16 code-unit order,
+file bytes, and `executable`. Entries sort by UTF-8 byte order of `path` -- byte order, not UTF-16 code-unit order,
 so non-ASCII and non-BMP names order deterministically across runtimes. Overlay-generated files are included (they
 are part of the hashed content); the ownership marker is the only exclusion.
 
