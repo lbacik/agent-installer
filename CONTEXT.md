@@ -83,3 +83,7 @@ _Avoid_: content hash, checksum
 **Expected Hash**:
 The source files of an artifact plus any installer Overlays, hashed with the artifact's content-identity algorithm. It is not a pristine upstream-tree hash and must never be presented as one.
 _Avoid_: source hash, upstream hash
+
+**Offline Verification**:
+Checking that explicitly requested managed artifacts' base-store copies still match their recorded content identity, without contacting their source repository and without changing anything. It reports each artifact's recorded provenance as it was recorded; it never proves what the source currently contains.
+_Avoid_: audit, health check, fresh verification
