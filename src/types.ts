@@ -295,6 +295,74 @@ export interface InstallOutcome {
   error?: { code: InstallErrorCode; message: string };
 }
 
+/** The closed refusal-code vocabulary for offline verification (`verify` per-artifact `refusals[].code`). */
+export type VerifyRefusalCode =
+  | "not-managed"
+  | "missing"
+  | "not-owned"
+  | "invalid-content"
+  | "unsupported-algorithm"
+  | "provenance-missing"
+  | "inconsistent-record"
+  | "modified";
+
+/** One structured reason a requested artifact refused verification. */
+export interface VerifyRefusal {
+  code: VerifyRefusalCode;
+  message: string;
+}
+
+/** Exactly one verification record per distinct requested artifact id. */
+export interface VerifyArtifactRecord {
+  id: string;
+  kind: ArtifactKind;
+  name: string;
+  sourceIdentity: string;
+  relativeSourcePath: string;
+  basePath: string;
+  /** Base-store-relative location: the skill name, or `<name>.md` for a prompt. */
+  storeRelativePath: string;
+  /** Always present; `null` when not recorded (for example a local source). */
+  requestedRef: string | null;
+  /** Always present; `null` when not recorded (for example a local source). */
+  resolvedCommit: string | null;
+  installedAt: string;
+  /** Every Overlay recorded on the entry, or empty when none applied. */
+  overlays: OverlayRecord[];
+  verification: "recorded-installation";
+  result: "verified" | "refused";
+  refusals: VerifyRefusal[];
+  /**
+   * Recorded content identity plus the freshly computed digest. `expectedHash`
+   * is the recorded `sourceHash` under the recorded `algorithm`;
+   * `installedHash` is freshly computed from the Base Store copy now. Present
+   * whenever the fresh walk succeeds (even on refused records), absent
+   * otherwise.
+   */
+  content?: { algorithm: string; expectedHash: string; installedHash: string };
+  /** Complete inventory of the Base Store copy, from the same fresh walk as `installedHash`. */
+  files?: ContentFileRecord[];
+}
+
+/** The run-level verdict for offline verification. */
+export type VerifyRunOutcome = "verified" | "refused" | "error";
+
+/**
+ * The versioned, complete, machine-readable outcome of one offline
+ * verification run: exactly one record per distinct requested artifact id,
+ * plus run-level summaries. Rendered to JSON from this value alone, with no
+ * further filesystem reads.
+ */
+export interface VerifyOutcome {
+  schemaVersion: 3;
+  kind: "agent-installer.verify-report";
+  baseStore: { skills: string; prompts: string };
+  outcome: VerifyRunOutcome;
+  artifacts: VerifyArtifactRecord[];
+  notice: string;
+  error?: { code: "state-unreadable"; message: string };
+}
+
 /**
  * A file the installer materializes into the base-store copy of an artifact,
  * either adding one the source repository does not have or replacing one it

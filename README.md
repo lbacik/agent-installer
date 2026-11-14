@@ -325,13 +325,35 @@ agent-installer sync --dry-run
 Pass `--allow-conflicts` to sync the eligible pairs and skip conflicting ones
 instead of aborting; add `--json` for a machine-readable report.
 
+Verify that selected managed artifacts are still intact, offline:
+
+```bash
+agent-installer verify --only skill:review --only prompt:commit-message
+agent-installer verify --only skill:review --json
+```
+
+`verify` rehashes each selected Base Store copy and compares it with the
+recorded installed content identity, reporting each artifact's recorded
+provenance (`requestedRef`/`resolvedCommit`, which may differ per artifact
+even for one shared source). It never contacts a source, runs Git, uses the
+network, reads `config.yaml`, or checks Tool Exposures, and it never modifies
+the Base Store, exposures, or state -- a malformed `config.yaml` cannot break
+it, and deleting the source after installing changes nothing. At least one
+`--only` selector is required (there is no `--all` and no implicit whole-store
+mode); duplicate selectors collapse to one and records follow first-appearance
+order. Unrelated managed artifacts are never read, reported, or able to fail
+the run. The human output prints one `verified <id>` / `refused <id> (codes)`
+line per requested artifact, then a notice stating that only previously
+recorded provenance was verified -- never the current state of any source.
+
 ### Machine-Readable JSON Output
 
-`scan`, `install`, and `list` accept `--json`. Under `--json`:
+`scan`, `install`, `list`, and `verify` accept `--json`. Under `--json`:
 
 - stdout carries exactly one JSON object and nothing else; all human-readable progress, warnings, and errors move to
   stderr.
-- The object always carries `schemaVersion: 2`, so a later shape change cannot break a consumer silently.
+- The object always carries `schemaVersion` (`2` for `scan`/`list`; `2` by default for `install`, `3` with
+  `--json-schema 3`; `3` for `verify`), so a later shape change cannot break a consumer silently.
 - Exit statuses are unchanged. A strict-mode abort (an unmanaged conflict without `--allow-conflicts`, or an
   `--only` selector that matches nothing) still exits non-zero, and still prints a JSON object on stdout describing
   the refusal via an `error` string.
@@ -444,6 +466,59 @@ whether the upstream source has since changed:
   ]
 }
 ```
+
+`verify --json` emits a v3 offline-verification report (`kind:
+"agent-installer.verify-report"`; there is no `--json-schema` flag for
+`verify`):
+
+```json
+{
+  "schemaVersion": 3,
+  "kind": "agent-installer.verify-report",
+  "baseStore": { "skills": "/home/user/.agents/skills", "prompts": "/home/user/.agents/prompts" },
+  "outcome": "verified",
+  "artifacts": [
+    {
+      "id": "skill:review",
+      "verification": "recorded-installation",
+      "result": "verified",
+      "refusals": [],
+      "content": { "algorithm": "agent-installer-tree-v2", "expectedHash": "...", "installedHash": "..." },
+      "files": [],
+      "...": "..."
+    }
+  ],
+  "notice": "This verifies previously recorded provenance only and does not prove the current state of any source."
+}
+```
+
+Each record carries `id`, `kind`, `name`, the recorded Source Identity,
+`relativeSourcePath`, the absolute `basePath`, `storeRelativePath`,
+`requestedRef`/`resolvedCommit` (always present, `null` when not recorded, for
+example local sources), `installedAt`, and `overlays[]` as recorded, plus
+`verification: "recorded-installation"`, a `result` (`verified` or `refused`),
+and `refusals[]` (`{code, message}`, empty when verified). `content` holds the
+recorded `algorithm` and `expectedHash` alongside the freshly computed
+`installedHash`, with `files[]` from the same fresh walk (same rules as the
+install report); both are present whenever the walk succeeds -- including on
+refused records -- and absent otherwise. There is no `disposition` and no
+`exposures[]`. Refusal codes form a closed set, checked in this order
+(`not-managed` and `missing` short-circuit; the rest are all reported when
+several apply): `not-managed` (no managed entry for the id), `missing` (the
+recorded base path is absent or the wrong file type), `not-owned` (the
+ownership marker is absent, unparsable, or records a different id),
+`invalid-content` (hashing refused the copy: internal symlink, special file,
+or unreadable), `unsupported-algorithm` (recorded as
+`agent-installer-tree-v1`, which is never accepted as integrity evidence;
+reinstall at the recorded commit), `provenance-missing` (a Git-sourced entry
+with no `resolvedCommit`; local entries verify with `null`),
+`inconsistent-record` (recorded hashes differ, or recorded overlays are
+unknown), `modified` (the fresh hash differs from the recorded installed
+hash). `outcome` is `verified` only when every requested artifact verified,
+`refused` otherwise, and `error` (with `error: {code: "state-unreadable",
+message}` and no artifact records) when state cannot be read or has an
+unsupported version. Exit code is 0 only when `outcome` is `verified`, 1 for
+refusals, state errors, and usage errors (such as missing `--only`).
 
 ## Typical Workflow
 

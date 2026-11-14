@@ -45,10 +45,19 @@ async function collectDirectoryEntries(dir: string, prefix: string): Promise<Has
 
         if (dirent.isFile()) {
           const stat = await fs.stat(entryPath);
+          if (!stat.isFile()) {
+            throw new SourceConfigurationError(
+              `Skill directory contains a non-regular file at "${relativePath}" (${entryPath}). ` +
+                `Only regular files and directories are supported; replace it with a regular file in the source repository.`
+            );
+          }
           return [{ relativePath, isExecutable: (stat.mode & EXECUTABLE_MODE_MASK) !== 0 }];
         }
 
-        return [];
+        throw new SourceConfigurationError(
+          `Skill directory contains an unsupported file type at "${relativePath}" (${entryPath}). ` +
+            `Only regular files and directories are supported; replace it with a regular file or directory in the source repository.`
+        );
       })
   );
 

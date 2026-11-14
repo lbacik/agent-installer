@@ -11,7 +11,8 @@ import type {
   ExposureState,
   InstallOutcome,
   ManagedEntry,
-  RemovedArtifactState
+  RemovedArtifactState,
+  VerifyOutcome
 } from "./types.js";
 
 export const JSON_SCHEMA_VERSION = 2 as const;
@@ -373,6 +374,40 @@ export function buildSyncErrorJson(error: unknown, skipped: JsonSyncSkipped[] = 
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Schema version carried by every verify report. */
+export const VERIFY_REPORT_SCHEMA_VERSION = 3 as const;
+
+/** `kind` discriminator carried by every verify report. */
+export const VERIFY_REPORT_KIND = "agent-installer.verify-report" as const;
+
+export interface VerifyReportJson {
+  schemaVersion: typeof VERIFY_REPORT_SCHEMA_VERSION;
+  kind: typeof VERIFY_REPORT_KIND;
+  baseStore: VerifyOutcome["baseStore"];
+  outcome: VerifyOutcome["outcome"];
+  artifacts: VerifyOutcome["artifacts"];
+  notice: string;
+  error?: { code: string; message: string };
+}
+
+/**
+ * Renders the verify report from the Verify Outcome value alone: no
+ * filesystem reads, and no fields threaded through one at a time. Run-level
+ * and per-artifact shapes pass through untouched so the report and the value
+ * can never disagree.
+ */
+export function buildVerifyReportJson(outcome: VerifyOutcome): VerifyReportJson {
+  return {
+    schemaVersion: VERIFY_REPORT_SCHEMA_VERSION,
+    kind: VERIFY_REPORT_KIND,
+    baseStore: outcome.baseStore,
+    outcome: outcome.outcome,
+    artifacts: outcome.artifacts,
+    notice: outcome.notice,
+    ...(outcome.error === undefined ? {} : { error: outcome.error })
+  };
 }
 
 export interface InstallReportJson {
