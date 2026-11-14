@@ -37,6 +37,20 @@ function makeState(
     basePath: `/home/.agents/${kind === "skill" ? `skills/${name}` : `prompts/${name}.md`}`,
     sourceHash: "source-hash",
     installedHash: status === "new" ? null : "installed-hash",
+    overlay: null,
+    sourceContent: {
+      algorithm: kind === "skill" ? "agent-installer-tree-v1" : "sha256",
+      digest: "source-hash",
+      files: []
+    },
+    installedContent:
+      status === "new"
+        ? null
+        : {
+            algorithm: kind === "skill" ? "agent-installer-tree-v1" : "sha256",
+            digest: "installed-hash",
+            files: []
+          },
     status,
     managedEntry: null,
     exposurePlan: [],
@@ -58,6 +72,8 @@ describe("formatManagedEntryLines", () => {
       exposures: [],
       sourceHash: "source-hash",
       installedHash: "installed-hash",
+      hashAlgorithm: "agent-installer-tree-v1",
+      overlays: [],
       installedAt: "2026-07-08T00:00:00.000Z"
     };
 
@@ -75,6 +91,8 @@ describe("formatManagedEntryLines", () => {
       exposures: [],
       sourceHash: "source-hash",
       installedHash: "installed-hash",
+      hashAlgorithm: "agent-installer-tree-v1",
+      overlays: [],
       installedAt: "2026-07-08T00:00:00.000Z"
     };
 
@@ -92,6 +110,8 @@ describe("formatManagedEntryLines", () => {
       exposures: [],
       sourceHash: "source-hash",
       installedHash: "installed-hash",
+      hashAlgorithm: "agent-installer-tree-v1",
+      overlays: [],
       installedAt: "2026-07-08T00:00:00.000Z",
       requestedRef: "main",
       resolvedCommit: "a".repeat(40)
@@ -240,6 +260,8 @@ describe("formatManagedEntryLines exposure breakdown", () => {
       exposures: [],
       sourceHash: "source-hash",
       installedHash: "installed-hash",
+      hashAlgorithm: "agent-installer-tree-v1",
+      overlays: [],
       installedAt: "2026-07-08T00:00:00.000Z"
     };
   }

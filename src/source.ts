@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { SourceConfigurationError } from "./errors.js";
 import { DiscoveredArtifact } from "./types.js";
 
 const DEFAULT_SKILL_MAX_DEPTH = 3;
@@ -35,7 +36,7 @@ async function discoverSkills(sourceRoot: string, maxDepth: number): Promise<Dis
       const name = path.basename(currentPath);
       const existing = skillsByName.get(name);
       if (existing) {
-        throw new Error(
+        throw new SourceConfigurationError(
           `Duplicate skill name "${name}" found at "${existing.relativeSourcePath}" and "${path.relative(sourceRoot, currentPath)}".`
         );
       }
@@ -93,7 +94,7 @@ export async function scanSourceRepository(inputPath: string, options?: ScanSour
       const name = path.basename(dirent.name, ".md");
       if (promptCandidates.has(name)) {
         const first = promptCandidates.get(name);
-        throw new Error(
+        throw new SourceConfigurationError(
           `Duplicate prompt or command name "${name}" found at "${first?.relativeSourcePath}" and "${path.join(folder, dirent.name)}".`
         );
       }
