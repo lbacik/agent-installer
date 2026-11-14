@@ -589,17 +589,19 @@ async function executeArtifactInstall(
   }
 
   if (!needsWrite) {
-    // Unchanged: verified, not written. Missing exposures are still repaired;
-    // the state entry is only touched when the exposure set actually changed.
+    // Unchanged: verified, not written. Missing exposures are still repaired,
+    // and the state entry advances to this run's provenance, content identity
+    // and overlays whenever any of them (or the exposure set) actually changed.
     const { exposures, results } = await applyExposurePlanDetailed(current.exposurePlan, current.basePath, existingExposures);
     const previous = entries.get(current.id);
     let entry: ManagedEntry;
-    if (previous !== undefined && !sameExposureSet(previous.exposures, exposures)) {
-      entry = { ...previous, exposures, overlays: overlay === null ? [] : [overlayToRecord(overlay)] };
-      entries.set(entry.id, entry);
-      await saveEntries(paths, entries);
-    } else if (previous !== undefined) {
-      entry = previous;
+    if (previous !== undefined) {
+      const refreshed = refreshUnchangedEntry(previous, current, exposures);
+      if (refreshed !== null) {
+        entries.set(refreshed.id, refreshed);
+        await saveEntries(paths, entries);
+      }
+      entry = entries.get(current.id)!;
     } else {
       entry = buildManagedEntry(current.artifact, paths, expected, current.installedContent!, overlay, exposures);
       entries.set(entry.id, entry);
@@ -662,16 +664,66 @@ export async function installArtifacts(states: ArtifactState[], home?: string): 
   return installed;
 }
 
+// Advances one verified-but-unwritten entry to this run's provenance, content
+// identity and overlays without touching files, symlinks, markers, or
+// `installedAt`. Reconciliation already rehashed the Base Store copy and
+// compared it with this commit's expected source content, so recording this
+// run's `requestedRef`/`resolvedCommit`, the v2 hash algorithm and the real
+// overlays is safe. Returns the refreshed entry, or null when the stored entry
+// already matches this run on every refreshed field.
+function refreshUnchangedEntry(
+  existing: ManagedEntry,
+  current: ArtifactState,
+  exposures: ExposureRecord[]
+): ManagedEntry | null {
+  if (current.installedContent === null) {
+    return null;
+  }
+
+  const overlayRecords = current.overlay === null ? [] : [overlayToRecord(current.overlay)];
+  const requestedRef = current.artifact.requestedRef;
+  const resolvedCommit = current.artifact.resolvedCommit;
+  if (
+    sameExposureSet(existing.exposures, exposures) &&
+    existing.sourceHash === current.sourceContent.digest &&
+    existing.installedHash === current.installedContent.digest &&
+    existing.hashAlgorithm === current.sourceContent.algorithm &&
+    existing.requestedRef === requestedRef &&
+    existing.resolvedCommit === resolvedCommit &&
+    JSON.stringify(existing.overlays) === JSON.stringify(overlayRecords)
+  ) {
+    return null;
+  }
+
+  const refreshed: ManagedEntry = {
+    ...existing,
+    exposures,
+    sourceHash: current.sourceContent.digest,
+    installedHash: current.installedContent.digest,
+    hashAlgorithm: current.sourceContent.algorithm,
+    overlays: overlayRecords,
+    requestedRef,
+    resolvedCommit
+  };
+  if (requestedRef === undefined) {
+    delete refreshed.requestedRef;
+  }
+  if (resolvedCommit === undefined) {
+    delete refreshed.resolvedCommit;
+  }
+
+  return refreshed;
+}
+
 // Refreshes provenance for selected artifacts that reconciled as `installed-same`
-// during this run. Reconciliation already rehashed the Base Store copy and compared
-// it with this commit's expected source hash, so recording this run's
-// `requestedRef`/`resolvedCommit` is safe without touching files, symlinks, markers,
-// or `installedAt`. Each refreshed entry is persisted as it completes, bounding a
-// mid-run crash to at most one unsaved artifact. Local sources carry no Git
-// provenance, so callers must only invoke this for remote sources.
+// during this run. Pure installed-same artifacts never pass through
+// executeArtifactInstall, so their entries advance here; each refreshed entry
+// is persisted as it completes, bounding a mid-run crash to at most one unsaved
+// artifact. Local sources carry no Git provenance, so callers must only invoke
+// this for remote sources.
 async function refreshUnchangedProvenance(selectedStates: ArtifactState[], home?: string): Promise<void> {
   const candidates = selectedStates.filter(
-    (state) => state.status === "installed-same" && state.managedEntry !== null && state.installedHash !== null
+    (state) => state.status === "installed-same" && state.managedEntry !== null && state.installedContent !== null
   );
   if (candidates.length === 0) {
     return;
@@ -687,31 +739,11 @@ async function refreshUnchangedProvenance(selectedStates: ArtifactState[], home?
       continue;
     }
 
-    const requestedRef = current.artifact.requestedRef;
-    const resolvedCommit = current.artifact.resolvedCommit;
-    const installedHash = current.installedHash as string;
-
-    if (
-      existing.sourceHash === current.sourceHash &&
-      existing.installedHash === installedHash &&
-      existing.requestedRef === requestedRef &&
-      existing.resolvedCommit === resolvedCommit
-    ) {
+    // Pure installed-same artifacts keep every owned exposure as-is; only the
+    // recorded provenance/identity/overlays advance to this run.
+    const refreshed = refreshUnchangedEntry(existing, current, existing.exposures);
+    if (refreshed === null) {
       continue;
-    }
-
-    const refreshed: ManagedEntry = {
-      ...existing,
-      sourceHash: current.sourceHash,
-      installedHash,
-      requestedRef,
-      resolvedCommit
-    };
-    if (requestedRef === undefined) {
-      delete refreshed.requestedRef;
-    }
-    if (resolvedCommit === undefined) {
-      delete refreshed.resolvedCommit;
     }
 
     entries.set(refreshed.id, refreshed);
@@ -831,9 +863,9 @@ function unchangedOutcomeRecord(paths: TargetPaths, state: ArtifactState): Insta
       result: "present" as const
     })),
     content: {
-      algorithm: installedContent.algorithm,
-      digest: installedContent.digest,
-      files: installedContent.files
+      algorithm: state.sourceContent.algorithm,
+      expectedHash: state.sourceContent.digest,
+      installedHash: installedContent.digest
     },
     files: installedContent.files,
     overlays: state.overlay === null ? [] : [overlayToRecord(state.overlay)]
@@ -851,8 +883,8 @@ function installedOutcomeRecord(
     exposures: result.exposureResults,
     content: {
       algorithm: expected.algorithm,
-      digest: expected.digest,
-      files: result.installedContent.files
+      expectedHash: expected.digest,
+      installedHash: result.installedContent.digest
     },
     // The inventory always describes what actually verified on disk.
     files: result.installedContent.files,
@@ -871,8 +903,8 @@ function failedOutcomeRecord(
   if (installedContent !== null) {
     record.content = {
       algorithm: state.sourceContent.algorithm,
-      digest: state.sourceContent.digest,
-      files: installedContent.files
+      expectedHash: state.sourceContent.digest,
+      installedHash: installedContent.digest
     };
     record.files = installedContent.files;
   }
@@ -1106,6 +1138,17 @@ export async function runInstall(request: InstallRequest): Promise<InstallAllRes
         })
       };
       return { states, installed, conflicts, exposureConflicts, pruned: [], prunedSkippedExposures: [], outcome };
+    }
+
+    // A selected artifact that reconciled as `installed-same` verified this run's
+    // content by rehashing the Base Store copy, so its entry records this run's
+    // Git provenance (plus the v2 hash algorithm and real overlays) without
+    // rewriting files, symlinks, markers, or `installedAt`. Local sources carry
+    // no Git provenance and are left byte-for-byte unchanged. Bumped
+    // installed-different artifacts with matching content already advanced
+    // through executeArtifactInstall above.
+    if (source.resolvedCommit !== undefined) {
+      await refreshUnchangedProvenance(selectedStates, request.home);
     }
 
     for (const current of selectedStates) {

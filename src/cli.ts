@@ -278,8 +278,9 @@ function createProgram(): Command {
     .argument("[path]", "Source repository to scan", process.cwd())
     .action(async (inputPath, options: ScanCommandOptions & { json?: boolean; jsonSchema?: string }) => {
       const json = options.json === true;
+      // Usage errors fail before any work starts, outside the JSON error wrapping below.
+      parseJsonSchemaOption(options.jsonSchema, json, "scan");
       try {
-        parseJsonSchemaOption(options.jsonSchema, json, "scan");
         await withResolvedArtifactStates(
           inputPath,
           undefined,
@@ -453,8 +454,9 @@ function createProgram(): Command {
     )
     .action(async (options: { listLength?: number; json?: boolean; jsonSchema?: string }) => {
       const json = options.json === true;
+      // Usage errors fail before any work starts, outside the JSON error wrapping below.
+      parseJsonSchemaOption(options.jsonSchema, json, "list");
       try {
-        parseJsonSchemaOption(options.jsonSchema, json, "list");
         const paths = resolveTargetPaths();
         const config = await loadConfig(paths);
         const state = await loadState(paths);
@@ -518,8 +520,9 @@ function createProgram(): Command {
     .action(
       async (options: { only: string[]; target: string[]; allowConflicts?: boolean; dryRun?: boolean; json?: boolean; jsonSchema?: string }) => {
         const json = options.json === true;
+        // Usage errors fail before any work starts, outside the JSON error wrapping below.
+        parseJsonSchemaOption(options.jsonSchema, json, "sync");
         try {
-          parseJsonSchemaOption(options.jsonSchema, json, "sync");
           const result = await syncExposures({
             only: options.only.length > 0 ? options.only : undefined,
             targets: options.target.length > 0 ? options.target : undefined,

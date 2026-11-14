@@ -252,9 +252,14 @@ export interface InstallArtifactOutcome {
   requestedRef: string | null;
   /** Always present; `null` when not applicable (for example a local source). */
   resolvedCommit: string | null;
-  /** Freshly verified Content Identity; present whenever the Base Store copy exists after the run. */
-  content?: ContentIdentity;
-  /** Complete inventory of the Base Store copy's regular content files, from the same fresh walk as `content`. */
+  /**
+   * Freshly verified Content Identity; present whenever the Base Store copy
+   * exists after the run. `expectedHash` is the source files plus any
+   * Overlays (never a pristine upstream-tree hash); `installedHash` is freshly
+   * computed in this run from the Base Store copy.
+   */
+  content?: { algorithm: string; expectedHash: string; installedHash: string };
+  /** Complete inventory of the Base Store copy's regular content files, from the same fresh walk as `installedHash`. */
   files?: ContentFileRecord[];
   /** Every installer Overlay applied, or empty. */
   overlays: OverlayRecord[];

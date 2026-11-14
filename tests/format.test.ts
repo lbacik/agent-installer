@@ -134,6 +134,8 @@ describe("formatManagedEntryLines", () => {
         exposures: [],
         sourceHash: "source-hash",
         installedHash: "installed-hash",
+        hashAlgorithm: "agent-installer-tree-v2",
+        overlays: [],
         installedAt: "2026-07-08T00:00:00.000Z"
       },
       {
@@ -146,6 +148,8 @@ describe("formatManagedEntryLines", () => {
         exposures: [],
         sourceHash: "source-hash",
         installedHash: "installed-hash",
+        hashAlgorithm: "sha256",
+        overlays: [],
         installedAt: "2026-07-08T00:00:00.000Z"
       }
     ];
