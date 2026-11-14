@@ -5,6 +5,7 @@ import type { ArtifactState, ManagedEntry, RemovedArtifactState } from "../src/t
 
 function makeState(id: string, status: ArtifactState["status"] = "new"): ArtifactState {
   const [kind, name] = id.split(":") as [ArtifactState["artifact"]["kind"], string];
+  const hashAlgorithm = kind === "skill" ? "agent-installer-tree-v2" : "sha256";
   const managedEntry: ManagedEntry | null =
     status === "new"
       ? null
@@ -18,6 +19,8 @@ function makeState(id: string, status: ArtifactState["status"] = "new"): Artifac
           exposures: [],
           sourceHash: "source-hash",
           installedHash: "installed-hash",
+          hashAlgorithm,
+          overlays: [],
           installedAt: "2026-07-08T00:00:00.000Z"
         };
 
@@ -33,6 +36,9 @@ function makeState(id: string, status: ArtifactState["status"] = "new"): Artifac
     basePath: `/home/.agents/${name}`,
     sourceHash: "source-hash",
     installedHash: status === "new" ? null : "installed-hash",
+    overlay: null,
+    sourceContent: { algorithm: hashAlgorithm, digest: "source-hash", files: [] },
+    installedContent: status === "new" ? null : { algorithm: hashAlgorithm, digest: "installed-hash", files: [] },
     status,
     managedEntry,
     exposurePlan: [],
@@ -51,6 +57,8 @@ function makeRemovedState(): RemovedArtifactState {
     exposures: [],
     sourceHash: "source-hash",
     installedHash: "installed-hash",
+    hashAlgorithm: "agent-installer-tree-v2",
+    overlays: [],
     installedAt: "2026-07-08T00:00:00.000Z"
   };
 

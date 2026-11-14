@@ -9,11 +9,18 @@ import type {
   ExposureKind,
   ExposureRecord,
   ExposureState,
+  InstallOutcome,
   ManagedEntry,
   RemovedArtifactState
 } from "./types.js";
 
 export const JSON_SCHEMA_VERSION = 2 as const;
+
+/** Schema version selected with `install --json-schema 3`. */
+export const INSTALL_REPORT_SCHEMA_VERSION = 3 as const;
+
+/** `kind` discriminator carried by every v3 install report. */
+export const INSTALL_REPORT_KIND = "agent-installer.install-report" as const;
 
 export interface JsonArtifactRecord {
   id: string;
@@ -366,4 +373,36 @@ export function buildSyncErrorJson(error: unknown, skipped: JsonSyncSkipped[] = 
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export interface InstallReportJson {
+  schemaVersion: typeof INSTALL_REPORT_SCHEMA_VERSION;
+  kind: typeof INSTALL_REPORT_KIND;
+  baseStore: { skills: string; prompts: string };
+  outcome: InstallOutcome["outcome"];
+  exposureOutcome: InstallOutcome["exposureOutcome"];
+  artifacts: InstallOutcome["artifacts"];
+  unmatchedSelectors: string[];
+  pruned: InstallOutcome["pruned"];
+  error?: { code: string; message: string };
+}
+
+/**
+ * Renders the v3 install report from the Install Outcome value alone: no
+ * filesystem reads, and no fields threaded through one at a time. Run-level
+ * and per-artifact shapes pass through untouched so the report and the value
+ * can never disagree.
+ */
+export function buildInstallReportJson(outcome: InstallOutcome): InstallReportJson {
+  return {
+    schemaVersion: INSTALL_REPORT_SCHEMA_VERSION,
+    kind: INSTALL_REPORT_KIND,
+    baseStore: outcome.baseStore,
+    outcome: outcome.outcome,
+    exposureOutcome: outcome.exposureOutcome,
+    artifacts: outcome.artifacts,
+    unmatchedSelectors: outcome.unmatchedSelectors,
+    pruned: outcome.pruned,
+    ...(outcome.error === undefined ? {} : { error: outcome.error })
+  };
 }

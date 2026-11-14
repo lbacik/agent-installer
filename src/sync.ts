@@ -262,7 +262,7 @@ export async function syncExposures(options: SyncOptions = {}, home?: string): P
     skippedOrphanRemovals.push(...skipped);
   }
 
-  await saveState(paths, { version: 3, entries: [...entriesById.values()].sort((left, right) => left.id.localeCompare(right.id)) });
+  await saveState(paths, { version: 4, entries: [...entriesById.values()].sort((left, right) => left.id.localeCompare(right.id)) });
 
   return { actions, legacyNotices, skippedOrphanRemovals, dryRun: false };
 }

@@ -35,6 +35,7 @@ function makeState(
   exposurePlan: ExposurePlanEntry[] = []
 ): ArtifactState {
   const [kind, name] = id.split(":") as [ArtifactState["artifact"]["kind"], string];
+  const hashAlgorithm = kind === "skill" ? "agent-installer-tree-v2" : "sha256";
   const managedEntry: ManagedEntry | null =
     status === "new"
       ? null
@@ -48,6 +49,8 @@ function makeState(
           exposures: [],
           sourceHash: "source-hash",
           installedHash: "installed-hash",
+          hashAlgorithm,
+          overlays: [],
           installedAt: "2026-07-08T00:00:00.000Z"
         };
 
@@ -63,6 +66,9 @@ function makeState(
     basePath: `/home/.agents/${name}`,
     sourceHash: "source-hash",
     installedHash: status === "new" ? null : "installed-hash",
+    overlay: null,
+    sourceContent: { algorithm: hashAlgorithm, digest: "source-hash", files: [] },
+    installedContent: status === "new" ? null : { algorithm: hashAlgorithm, digest: "installed-hash", files: [] },
     status,
     managedEntry,
     exposurePlan,
@@ -81,6 +87,8 @@ const removedManagedEntry: ManagedEntry = {
   exposures: [],
   sourceHash: "source-hash",
   installedHash: "installed-hash",
+  hashAlgorithm: "sha256",
+  overlays: [],
   installedAt: "2026-07-08T00:00:00.000Z"
 };
 

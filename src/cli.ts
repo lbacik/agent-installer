@@ -6,7 +6,16 @@ import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import { runConfigInit } from "./config-init.js";
 import { loadConfig } from "./config.js";
-import { collectExposureConflicts, InstallConflictError, installAllFromSource, installArtifacts, removeArtifacts } from "./install.js";
+import { ConfigurationError, SourceConfigurationError, SourceUnavailableError } from "./errors.js";
+import {
+  collectExposureConflicts,
+  InstallConflictError,
+  installAllFromSource,
+  installArtifacts,
+  removeArtifacts,
+  runInstall,
+  UnmatchedSelectorsError
+} from "./install.js";
 import {
   collectLegacyNotices,
   formatArtifactLine,
@@ -22,6 +31,7 @@ import { promptForManagedArtifactRemovals, promptForSelections } from "./interac
 import {
   buildArtifactsErrorJson,
   buildInstallErrorJson,
+  buildInstallReportJson,
   buildInstallSuccessJson,
   buildListJson,
   buildScanJson,
@@ -31,6 +41,7 @@ import {
   syncConflictToSkipped
 } from "./json-report.js";
 import { resolveTargetPaths } from "./paths.js";
+import type { InstallErrorCode, InstallOutcome } from "./types.js";
 import { loadState } from "./state.js";
 import { withResolvedArtifactStates } from "./source-workflow.js";
 import { SyncConflictError, syncExposures } from "./sync.js";
@@ -58,6 +69,82 @@ function printJson(value: unknown): void {
 
 function addJsonOption(command: Command, description: string): Command {
   return command.option("--json", description);
+}
+
+// Selects the JSON report schema version. Only `install` supports schema 3;
+// `scan`, `list` and `sync` accept 2 (the default) and reject 3. The flag
+// requires `--json`, and anything but 2 or 3 is rejected, all before any work
+// starts so a misuse never changes anything on disk.
+function addJsonSchemaOption(command: Command): Command {
+  return command.option("--json-schema <schema>", "JSON report schema version (2 or 3; 3 is install-only)");
+}
+
+function parseJsonSchemaOption(
+  raw: string | undefined,
+  json: boolean,
+  commandName: "install" | "scan" | "list" | "sync"
+): 2 | 3 {
+  if (raw === undefined) {
+    return 2;
+  }
+
+  if (json !== true) {
+    throw new Error("--json-schema requires --json.");
+  }
+
+  if (raw !== "2" && raw !== "3") {
+    throw new Error(`--json-schema must be 2 or 3, got ${JSON.stringify(raw)}.`);
+  }
+
+  if (raw === "3" && commandName !== "install") {
+    throw new Error(`--json-schema 3 is only supported by install; ${commandName} supports --json-schema 2.`);
+  }
+
+  return raw === "3" ? 3 : 2;
+}
+
+function classifyReportError(error: unknown): { code: InstallErrorCode; message: string } {
+  if (error instanceof UnmatchedSelectorsError) {
+    return { code: "unmatched-selector", message: error.message };
+  }
+
+  if (error instanceof InstallConflictError) {
+    return { code: "conflict", message: error.message };
+  }
+
+  if (error instanceof SourceConfigurationError) {
+    return { code: "source-configuration", message: error.message };
+  }
+
+  if (error instanceof ConfigurationError) {
+    return { code: "config-invalid", message: error.message };
+  }
+
+  if (error instanceof SourceUnavailableError) {
+    return { code: "source-unavailable", message: error.message };
+  }
+
+  return { code: "install-failed", message: error instanceof Error ? error.message : String(error) };
+}
+
+// A v3 install report for a run that died before the outcome value existed
+// (source, config, or scan failure): no requested artifact could be
+// enumerated, so the report carries no artifact records and never reads as
+// complete verified success.
+function abortedReportForError(home: string | undefined, error: unknown): InstallOutcome {
+  const paths = resolveTargetPaths(home);
+  const classified = classifyReportError(error);
+  return {
+    schemaVersion: 3,
+    kind: "agent-installer.install-report",
+    baseStore: { skills: paths.agentsSkillsDir, prompts: paths.agentsPromptsDir },
+    outcome: "aborted",
+    exposureOutcome: "not-configured",
+    artifacts: [],
+    unmatchedSelectors: [],
+    pruned: [],
+    error: classified
+  };
 }
 
 function toStateMap(states: ArtifactState[]): Map<string, ArtifactState> {
@@ -182,13 +269,17 @@ function createProgram(): Command {
     thisCommand.error(`error: ${flags.join(" and ")} cannot precede the ${subcommand.name()} subcommand${hint}`);
   });
 
-  addJsonOption(
-    addRefOption(addSkillMaxDepthOption(program.command("scan"))),
-    "Emit a machine-readable JSON report on stdout instead of human-readable output"
+  addJsonSchemaOption(
+    addJsonOption(
+      addRefOption(addSkillMaxDepthOption(program.command("scan"))),
+      "Emit a machine-readable JSON report on stdout instead of human-readable output"
+    )
   )
     .argument("[path]", "Source repository to scan", process.cwd())
-    .action(async (inputPath, options: ScanCommandOptions & { json?: boolean }) => {
+    .action(async (inputPath, options: ScanCommandOptions & { json?: boolean; jsonSchema?: string }) => {
       const json = options.json === true;
+      // Usage errors fail before any work starts, outside the JSON error wrapping below.
+      parseJsonSchemaOption(options.jsonSchema, json, "scan");
       try {
         await withResolvedArtifactStates(
           inputPath,
@@ -218,9 +309,11 @@ function createProgram(): Command {
       }
     });
 
-  addJsonOption(
-    addRefOption(addSkillMaxDepthOption(program.command("install"))),
-    "Emit a machine-readable JSON report on stdout instead of human-readable output"
+  addJsonSchemaOption(
+    addJsonOption(
+      addRefOption(addSkillMaxDepthOption(program.command("install"))),
+      "Emit a machine-readable JSON report on stdout instead of human-readable output"
+    )
   )
     .description("Install or update discovered artifacts from the source repository (--all or --only).")
     .argument("[path]", "Source repository to scan", process.cwd())
@@ -240,9 +333,43 @@ function createProgram(): Command {
           allowConflicts?: boolean;
           prune?: boolean;
           json?: boolean;
+          jsonSchema?: string;
         }
       ) => {
         const json = options.json === true;
+        const schema = parseJsonSchemaOption(options.jsonSchema, json, "install");
+        if (schema === 3) {
+          if (options.all && options.only.length > 0) {
+            throw new Error("--all and --only are mutually exclusive.");
+          }
+
+          if (!options.all && options.only.length === 0) {
+            throw new Error("Use --all for non-interactive installation.");
+          }
+
+          try {
+            const only = options.only.length > 0 ? options.only : undefined;
+            const result = await runInstall({
+              sourcePath: inputPath,
+              scanOptions: scanOptionsFromCommand(options),
+              resolveOptions: options.ref === undefined ? undefined : { ref: options.ref },
+              allowConflicts: options.allowConflicts === true,
+              prune: options.prune === true,
+              ...(only === undefined ? {} : { only })
+            });
+
+            printJson(buildInstallReportJson(result.outcome));
+            if (result.outcome.outcome === "aborted") {
+              process.exitCode = 1;
+            }
+          } catch (error) {
+            printJson(buildInstallReportJson(abortedReportForError(undefined, error)));
+            process.exitCode = 1;
+          }
+
+          return;
+        }
+
         try {
           const only = options.only.length > 0 ? options.only : undefined;
           if (options.all && only !== undefined) {
@@ -313,9 +440,11 @@ function createProgram(): Command {
       }
     });
 
-  addJsonOption(
-    program.command("list"),
-    "Emit a machine-readable JSON report of managed entries on stdout, non-interactively"
+  addJsonSchemaOption(
+    addJsonOption(
+      program.command("list"),
+      "Emit a machine-readable JSON report of managed entries on stdout, non-interactively"
+    )
   )
     .description("Interactively manage currently installed artifacts from the base store.")
     .option(
@@ -323,8 +452,10 @@ function createProgram(): Command {
       "Number of artifacts visible in the interactive selection list",
       (value) => parsePositiveInteger(value, "--list-length")
     )
-    .action(async (options: { listLength?: number; json?: boolean }) => {
+    .action(async (options: { listLength?: number; json?: boolean; jsonSchema?: string }) => {
       const json = options.json === true;
+      // Usage errors fail before any work starts, outside the JSON error wrapping below.
+      parseJsonSchemaOption(options.jsonSchema, json, "list");
       try {
         const paths = resolveTargetPaths();
         const config = await loadConfig(paths);
@@ -377,17 +508,20 @@ function createProgram(): Command {
       }
     });
 
-  program
-    .command("sync")
-    .description("Reconcile installed artifacts' exposures against the current config.yaml, without touching sources or content.")
-    .option("--only <artifact-id>", "Sync only this artifact id, for example skill:review (repeatable)", collectOnly, [])
-    .option("--target <name>", "Sync only this config.yaml target name (repeatable)", collectOnly, [])
-    .option("--allow-conflicts", "Sync the eligible pairs and skip conflicting ones instead of aborting")
-    .option("--dry-run", "Print the planned actions without touching the filesystem or state")
-    .option("--json", "Emit a machine-readable JSON report on stdout instead of human-readable output")
-    .action(
-      async (options: { only: string[]; target: string[]; allowConflicts?: boolean; dryRun?: boolean; json?: boolean }) => {
+  addJsonSchemaOption(
+    program
+      .command("sync")
+      .description("Reconcile installed artifacts' exposures against the current config.yaml, without touching sources or content.")
+      .option("--only <artifact-id>", "Sync only this artifact id, for example skill:review (repeatable)", collectOnly, [])
+      .option("--target <name>", "Sync only this config.yaml target name (repeatable)", collectOnly, [])
+      .option("--allow-conflicts", "Sync the eligible pairs and skip conflicting ones instead of aborting")
+      .option("--dry-run", "Print the planned actions without touching the filesystem or state")
+      .option("--json", "Emit a machine-readable JSON report on stdout instead of human-readable output")
+  ).action(
+      async (options: { only: string[]; target: string[]; allowConflicts?: boolean; dryRun?: boolean; json?: boolean; jsonSchema?: string }) => {
         const json = options.json === true;
+        // Usage errors fail before any work starts, outside the JSON error wrapping below.
+        parseJsonSchemaOption(options.jsonSchema, json, "sync");
         try {
           const result = await syncExposures({
             only: options.only.length > 0 ? options.only : undefined,

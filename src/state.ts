@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { PROMPT_HASH_ALGORITHM, SKILL_TREE_ALGORITHM_V1 } from "./hash.js";
 import { ManagedEntry } from "./types.js";
 import { TargetPaths } from "./paths.js";
 
@@ -57,8 +58,25 @@ const stateSchemaV3 = z.object({
   entries: z.array(managedEntrySchemaV3)
 });
 
+const overlayRecordSchema = z.object({
+  id: z.string(),
+  version: z.number(),
+  paths: z.array(z.string()),
+  effect: z.enum(["added", "modified"])
+});
+
+const managedEntrySchemaV4 = managedEntrySchemaV3.extend({
+  hashAlgorithm: z.string(),
+  overlays: z.array(overlayRecordSchema).nullable()
+});
+
+const stateSchemaV4 = z.object({
+  version: z.literal(4),
+  entries: z.array(managedEntrySchemaV4)
+});
+
 export interface InstallerState {
-  version: 3;
+  version: 4;
   entries: ManagedEntry[];
 }
 
@@ -95,12 +113,27 @@ function migrateV1ToV2(v1: z.infer<typeof stateSchemaV1>): z.infer<typeof stateS
 
 // v1/v2 always required a single, non-null exposurePath, so migration always
 // produces exactly one legacy (unnamed) exposure record per entry.
-function migrateV2ToV3(v2: z.infer<typeof stateSchemaV2>): InstallerState {
+function migrateV2ToV3(v2: z.infer<typeof stateSchemaV2>): z.infer<typeof stateSchemaV3> {
   return {
     version: 3,
     entries: v2.entries.map(({ exposurePath, ...entry }) => ({
       ...entry,
       exposures: [{ path: exposurePath, targetName: null }]
+    }))
+  };
+}
+
+// v3 hashes predate the versioned content identity: skill entries are read as
+// `agent-installer-tree-v1` and prompt entries as plain `sha256`. Whether the
+// codex-invocation-policy Overlay applied cannot be derived offline, so skill
+// entries migrate as unknown (`null`) and prompts as none (`[]`).
+function migrateV3ToV4(v3: z.infer<typeof stateSchemaV3>): InstallerState {
+  return {
+    version: 4,
+    entries: v3.entries.map((entry) => ({
+      ...entry,
+      hashAlgorithm: entry.kind === "skill" ? SKILL_TREE_ALGORITHM_V1 : PROMPT_HASH_ALGORITHM,
+      overlays: entry.kind === "skill" ? null : []
     }))
   };
 }
@@ -111,7 +144,7 @@ export async function loadState(paths: TargetPaths): Promise<InstallerState> {
     raw = await fs.readFile(paths.stateFile, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { version: 3, entries: [] };
+      return { version: 4, entries: [] };
     }
 
     throw error;
@@ -121,22 +154,28 @@ export async function loadState(paths: TargetPaths): Promise<InstallerState> {
   const version = typeof parsed === "object" && parsed !== null ? (parsed as { version?: unknown }).version : undefined;
 
   if (version === 1) {
-    const migrated = migrateV2ToV3(migrateV1ToV2(stateSchemaV1.parse(parsed)));
+    const migrated = migrateV3ToV4(migrateV2ToV3(migrateV1ToV2(stateSchemaV1.parse(parsed))));
     await saveState(paths, migrated);
     return migrated;
   }
 
   if (version === 2) {
-    const migrated = migrateV2ToV3(stateSchemaV2.parse(parsed));
+    const migrated = migrateV3ToV4(migrateV2ToV3(stateSchemaV2.parse(parsed)));
     await saveState(paths, migrated);
     return migrated;
   }
 
   if (version === 3) {
-    return stateSchemaV3.parse(parsed);
+    const migrated = migrateV3ToV4(stateSchemaV3.parse(parsed));
+    await saveState(paths, migrated);
+    return migrated;
   }
 
-  throw new Error(`Unsupported agent-installer state file version: ${JSON.stringify(version)}. Expected 1, 2, or 3.`);
+  if (version === 4) {
+    return stateSchemaV4.parse(parsed);
+  }
+
+  throw new Error(`Unsupported agent-installer state file version: ${JSON.stringify(version)}. Expected 1, 2, 3, or 4.`);
 }
 
 // Writes to a sibling temp path and renames it into place, so a crash mid-write can

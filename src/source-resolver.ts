@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { SourceUnavailableError } from "./errors.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -182,7 +183,14 @@ export async function resolveSourceInput(inputPath?: string, options: ResolveSou
       throw new Error("--ref can only be used with an HTTPS Git source.");
     }
 
-    const scanRoot = await fs.realpath(path.resolve(input));
+    let scanRoot: string;
+    try {
+      scanRoot = await fs.realpath(path.resolve(input));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new SourceUnavailableError(`Cannot read source repository at ${input}: ${detail}`);
+    }
+
     return {
       scanRoot,
       sourceIdentity: scanRoot,
@@ -209,7 +217,7 @@ export async function resolveSourceInput(inputPath?: string, options: ResolveSou
       const redactedDetail = redactSourceSecretsFromDetail(detail, input, displayUrl);
       const operation = args[0] ?? "git";
       const refSuffix = options.ref === undefined ? "" : ` (ref ${options.ref})`;
-      throw new Error(`git ${operation} for ${sourceIdentity}${refSuffix} failed: ${redactedDetail}`);
+      throw new SourceUnavailableError(`git ${operation} for ${sourceIdentity}${refSuffix} failed: ${redactedDetail}`);
     }
   };
 
