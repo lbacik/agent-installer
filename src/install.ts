@@ -505,6 +505,63 @@ export async function installArtifacts(states: ArtifactState[], home?: string): 
   return installed;
 }
 
+// Refreshes provenance for selected artifacts that reconciled as `installed-same`
+// during this run. Reconciliation already rehashed the Base Store copy and compared
+// it with this commit's expected source hash, so recording this run's
+// `requestedRef`/`resolvedCommit` is safe without touching files, symlinks, markers,
+// or `installedAt`. Each refreshed entry is persisted as it completes, bounding a
+// mid-run crash to at most one unsaved artifact. Local sources carry no Git
+// provenance, so callers must only invoke this for remote sources.
+async function refreshUnchangedProvenance(selectedStates: ArtifactState[], home?: string): Promise<void> {
+  const candidates = selectedStates.filter(
+    (state) => state.status === "installed-same" && state.managedEntry !== null && state.installedHash !== null
+  );
+  if (candidates.length === 0) {
+    return;
+  }
+
+  const paths = resolveTargetPaths(home);
+  const state = await loadState(paths);
+  const entries = new Map(state.entries.map((entry) => [entry.id, entry]));
+
+  for (const current of candidates) {
+    const existing = entries.get(current.id);
+    if (!existing) {
+      continue;
+    }
+
+    const requestedRef = current.artifact.requestedRef;
+    const resolvedCommit = current.artifact.resolvedCommit;
+    const installedHash = current.installedHash as string;
+
+    if (
+      existing.sourceHash === current.sourceHash &&
+      existing.installedHash === installedHash &&
+      existing.requestedRef === requestedRef &&
+      existing.resolvedCommit === resolvedCommit
+    ) {
+      continue;
+    }
+
+    const refreshed: ManagedEntry = {
+      ...existing,
+      sourceHash: current.sourceHash,
+      installedHash,
+      requestedRef,
+      resolvedCommit
+    };
+    if (requestedRef === undefined) {
+      delete refreshed.requestedRef;
+    }
+    if (resolvedCommit === undefined) {
+      delete refreshed.resolvedCommit;
+    }
+
+    entries.set(refreshed.id, refreshed);
+    await saveEntries(paths, entries);
+  }
+}
+
 export interface RemoveArtifactsResult {
   removed: ManagedEntry[];
   skippedExposures: SkippedExposureRemoval[];
@@ -600,6 +657,14 @@ export async function installAllFromSource(
     }
 
     const installed = await installArtifacts(installable, home);
+
+    // A selected artifact that reconciled as `installed-same` verified this run's
+    // content by rehashing the Base Store copy, so its entry records this run's
+    // Git provenance without rewriting files, symlinks, markers, or `installedAt`.
+    // Local sources carry no Git provenance and are left byte-for-byte unchanged.
+    if (source.resolvedCommit !== undefined) {
+      await refreshUnchangedProvenance(selectedStates, home);
+    }
 
     let pruned: RemovedArtifactState[] = [];
     let prunedSkippedExposures: SkippedExposureRemoval[] = [];
