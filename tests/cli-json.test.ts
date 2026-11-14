@@ -554,6 +554,32 @@ describe("--ref on subcommands", () => {
   });
 });
 
+describe("credentialed remote source diagnostics", () => {
+  const RAW_URL = "https://USER:SECRET@127.0.0.1:1/org/repo.git?token=QSECRET";
+
+  it("scan keeps credentials out of stderr and --json errors", async () => {
+    const home = await makeTempDir("agent-installer-cli-home-");
+
+    const human = await runCli(["scan", RAW_URL], home);
+    expect(human.exitCode).not.toBe(0);
+    for (const secret of ["USER:", "SECRET", "QSECRET"]) {
+      expect(human.stderr).not.toContain(secret);
+      expect(human.stdout).not.toContain(secret);
+    }
+    expect(human.stderr).toContain("git+https://127.0.0.1:1/org/repo.git");
+
+    const json = await runCli(["scan", RAW_URL, "--json"], home);
+    expect(json.exitCode).not.toBe(0);
+    const parsed = parseStdoutJson(json.stdout) as { error?: string };
+    expect(parsed.error).toBeDefined();
+    for (const secret of ["USER:", "SECRET", "QSECRET"]) {
+      expect(parsed.error ?? "").not.toContain(secret);
+      expect(json.stderr).not.toContain(secret);
+    }
+    expect(parsed.error ?? "").toContain("git+https://127.0.0.1:1/org/repo.git");
+  }, 60000);
+});
+
 describe("root options before a subcommand", () => {
   it("are rejected without suggesting a flag the subcommand does not accept", async () => {
     const home = await makeTempDir("agent-installer-cli-home-");

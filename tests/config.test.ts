@@ -376,9 +376,11 @@ describe("runConfigInit", () => {
       exposures: [{ path: path.join(legacySkillsDir, "review"), targetName: null }],
       sourceHash: "hash",
       installedHash: "hash",
+      hashAlgorithm: "agent-installer-tree-v2",
+      overlays: [],
       installedAt: "2026-07-08T00:00:00.000Z"
     };
-    await saveState(paths, { version: 3, entries: [legacyEntry] });
+    await saveState(paths, { version: 4, entries: [legacyEntry] });
 
     selectMock.mockResolvedValueOnce("claude");
     inputMock

@@ -1,8 +1,9 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { AgentInstallerConfig, expandHome, loadConfig } from "./config.js";
+import { InstallFailedError, SourceConfigurationError } from "./errors.js";
 import { formatConflictLine, formatExposureConflictLine } from "./format.js";
-import { hashArtifact } from "./hash.js";
+import { hashArtifactContent } from "./hash.js";
 import { artifactId, getBasePath, getMarkerPath, resolveExposurePath, resolveHome, resolveTargetPaths, TargetPaths } from "./paths.js";
 import { materializeOverlay, resolveInvocationPolicyOverlay } from "./skill-invocation-policy.js";
 import { loadState, saveState } from "./state.js";
@@ -12,14 +13,24 @@ import {
   ArtifactKind,
   ArtifactState,
   ArtifactStatus,
+  ContentIdentity,
   DiscoveredArtifact,
   ExposureConflictSummary,
+  ExposureInstallRecord,
   ExposureKind,
   ExposurePlanEntry,
   ExposureRecord,
   ExposureState,
+  InstallArtifactOutcome,
+  InstallDisposition,
+  InstallErrorCode,
+  InstallExposureSummary,
+  InstallOutcome,
+  InstallPrunedOutcome,
+  InstallRunOutcome,
   ManagedEntry,
   OverlayFile,
+  OverlayRecord,
   RemovedArtifactState,
   SkippedExposureRemoval
 } from "./types.js";
@@ -40,20 +51,22 @@ export function collectExposureConflicts(states: ArtifactState[]): ExposureConfl
   );
 }
 
+function conflictMessage(conflicts: ArtifactState[], exposureConflicts: ExposureConflictSummary[]): string {
+  return [
+    `Refusing to install: ${conflicts.length + exposureConflicts.length} artifact(s)/target(s) conflict with unmanaged targets.`,
+    ...conflicts.map((state) => `  ${formatConflictLine(state)}`),
+    ...exposureConflicts.map((conflict) => `  ${formatExposureConflictLine(conflict)}`),
+    "Use --allow-conflicts to install the remaining eligible artifacts and skip these."
+  ].join("\n");
+}
+
 // Thrown by installAllFromSource when unmanaged conflicts block the install and --allow-conflicts was not passed.
 export class InstallConflictError extends Error {
   constructor(
     public readonly conflicts: ArtifactState[],
     public readonly exposureConflicts: ExposureConflictSummary[] = []
   ) {
-    super(
-      [
-        `Refusing to install: ${conflicts.length + exposureConflicts.length} artifact(s)/target(s) conflict with unmanaged targets.`,
-        ...conflicts.map((state) => `  ${formatConflictLine(state)}`),
-        ...exposureConflicts.map((conflict) => `  ${formatExposureConflictLine(conflict)}`),
-        "Use --allow-conflicts to install the remaining eligible artifacts and skip these."
-      ].join("\n")
-    );
+    super(conflictMessage(conflicts, exposureConflicts));
     this.name = "InstallConflictError";
   }
 }
@@ -73,14 +86,22 @@ export class UnmatchedSelectorsError extends Error {
   }
 }
 
-function selectStates(states: ArtifactState[], only: string[]): ArtifactState[] {
+function partitionSelectors(states: ArtifactState[], only: string[]): { matched: ArtifactState[]; unmatched: string[] } {
   const byId = new Map(states.map((state) => [state.id, state]));
+  // Unmatched selectors are reported exactly as given (order and duplicates
+  // preserved); only the matched side is deduped so each artifact installs once.
   const unmatched = only.filter((id) => !byId.has(id));
+  const matched = [...new Set(only)].filter((id) => byId.has(id)).map((id) => byId.get(id) as ArtifactState);
+  return { matched, unmatched };
+}
+
+function selectStates(states: ArtifactState[], only: string[]): ArtifactState[] {
+  const { matched, unmatched } = partitionSelectors(states, only);
   if (unmatched.length > 0) {
-    throw new UnmatchedSelectorsError([...new Set(unmatched)]);
+    throw new UnmatchedSelectorsError(unmatched);
   }
 
-  return [...new Set(only)].map((id) => byId.get(id) as ArtifactState);
+  return matched;
 }
 
 async function pathExists(targetPath: string): Promise<boolean> {
@@ -102,6 +123,15 @@ async function removePath(targetPath: string): Promise<void> {
 
 export function exposureKindOf(kind: ArtifactKind): ExposureKind {
   return kind === "skill" ? "skills" : "prompts";
+}
+
+/** Base-store-relative location: the skill name, or `<name>.md` for a prompt. */
+export function getStoreRelativePath(artifact: Pick<DiscoveredArtifact, "kind" | "name">): string {
+  return artifact.kind === "skill" ? artifact.name : `${artifact.name}.md`;
+}
+
+export function overlayToRecord(overlay: OverlayFile): OverlayRecord {
+  return { id: overlay.id, version: overlay.version, paths: [overlay.relativePath], effect: overlay.effect };
 }
 
 // Computes, for one artifact, the desired exposure at every currently configured target
@@ -154,15 +184,26 @@ export async function buildExposurePlan(
 // basePath afterward. Shared by install's applyExposurePlan and sync's
 // applyEntrySyncActions so both create exposures the same way.
 export async function createOwnedSymlink(basePath: string, targetPath: string): Promise<boolean> {
+  return (await tryCreateOwnedSymlink(basePath, targetPath)).ok;
+}
+
+export async function tryCreateOwnedSymlink(
+  basePath: string,
+  targetPath: string
+): Promise<{ ok: true } | { ok: false; reason: string }> {
   try {
     await ensureParentDir(targetPath);
     await removePath(targetPath);
     await fs.symlink(basePath, targetPath);
-  } catch {
-    return false;
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
   }
 
-  return (await readSymlinkTarget(targetPath)) === basePath;
+  if ((await readSymlinkTarget(targetPath)) === basePath) {
+    return { ok: true };
+  }
+
+  return { ok: false, reason: `Exposure path ${targetPath} did not verify as a symlink to the managed copy after creation.` };
 }
 
 export type RevalidatedRemoval = "removed" | "already-gone" | "foreign";
@@ -190,31 +231,48 @@ export async function revalidateAndRemove(targetPath: string, basePath: string):
 // A failed creation is skipped rather than retried or rolled back, so a later target's
 // success is never undone by an earlier target's failure. The returned exposures
 // reflect exactly what verified as correct on disk after every attempt, merged with
-// whatever the entry already owned outside the current plan (e.g. a legacy exposure, or
+// whatever the entry already owns outside the current plan (e.g. a legacy exposure, or
 // one for a target no longer declared in config.yaml).
-async function applyExposurePlan(
+async function applyExposurePlanDetailed(
   plan: ExposurePlanEntry[],
   basePath: string,
   existingExposures: ExposureRecord[]
-): Promise<ExposureRecord[]> {
+): Promise<{ exposures: ExposureRecord[]; results: ExposureInstallRecord[] }> {
   const byPath = new Map(existingExposures.map((exposure) => [exposure.path, exposure]));
+  const results: ExposureInstallRecord[] = [];
 
   for (const entry of plan) {
     if (entry.status === "conflict") {
+      results.push({
+        targetName: entry.targetName,
+        path: entry.path,
+        result: "conflict",
+        reason: entry.reason ?? "conflict"
+      });
       continue;
     }
 
     if (entry.status === "match") {
       byPath.set(entry.path, { path: entry.path, targetName: entry.targetName });
+      results.push({ targetName: entry.targetName, path: entry.path, result: "present" });
       continue;
     }
 
-    if (await createOwnedSymlink(basePath, entry.path)) {
+    const created = await tryCreateOwnedSymlink(basePath, entry.path);
+    if (created.ok) {
       byPath.set(entry.path, { path: entry.path, targetName: entry.targetName });
+      results.push({ targetName: entry.targetName, path: entry.path, result: "created" });
+    } else {
+      results.push({
+        targetName: entry.targetName,
+        path: entry.path,
+        result: "failed",
+        reason: `Could not create exposure for target "${entry.targetName}" at ${entry.path}: ${created.reason}`
+      });
     }
   }
 
-  return [...byPath.values()];
+  return { exposures: [...byPath.values()], results };
 }
 
 async function resolveOverlay(artifact: DiscoveredArtifact): Promise<OverlayFile | null> {
@@ -236,6 +294,12 @@ async function copyArtifact(artifact: DiscoveredArtifact, basePath: string): Pro
   }
 
   await fs.copyFile(artifact.sourcePath, basePath);
+}
+
+/** Test seam: corrupts the just-written base copy so post-write verification must fail. */
+async function corruptInstalledCopy(kind: ArtifactKind, basePath: string): Promise<void> {
+  const target = kind === "skill" ? path.join(basePath, "SKILL.md") : basePath;
+  await fs.appendFile(target, "\n# injected corruption for verification-failure testing\n", "utf8");
 }
 
 export async function readSymlinkTarget(targetPath: string): Promise<string | null> {
@@ -265,8 +329,9 @@ async function writeMarker(entry: ManagedEntry): Promise<void> {
 function buildManagedEntry(
   artifact: DiscoveredArtifact,
   paths: TargetPaths,
-  sourceHash: string,
-  installedHash: string,
+  expected: ContentIdentity,
+  installedContent: ContentIdentity,
+  overlay: OverlayFile | null,
   existingExposures: ExposureRecord[]
 ): ManagedEntry {
   return {
@@ -277,8 +342,10 @@ function buildManagedEntry(
     relativeSourcePath: artifact.relativeSourcePath,
     basePath: getBasePath(paths, artifact),
     exposures: existingExposures,
-    sourceHash,
-    installedHash,
+    sourceHash: expected.digest,
+    installedHash: installedContent.digest,
+    hashAlgorithm: expected.algorithm,
+    overlays: overlay === null ? [] : [overlayToRecord(overlay)],
     installedAt: new Date().toISOString(),
     requestedRef: artifact.requestedRef,
     resolvedCommit: artifact.resolvedCommit
@@ -392,12 +459,12 @@ export async function collectArtifactStates(
   for (const artifact of sourceArtifacts) {
     const id = artifactId(artifact.kind, artifact.name);
     const overlay = await resolveOverlay(artifact);
-    const sourceHash = await hashArtifact(artifact.kind, artifact.sourcePath, overlay);
+    const sourceContent = await hashArtifactContent(artifact.kind, artifact.sourcePath, overlay);
     const managedEntry = entriesById.get(id) ?? null;
     const basePath = getBasePath(paths, artifact);
 
     let status: ArtifactState["status"] = "new";
-    let installedHash: string | null = null;
+    let installedContent: ContentIdentity | null = null;
     let conflictReason: string | undefined;
     let conflictPath: string | undefined;
 
@@ -406,13 +473,13 @@ export async function collectArtifactStates(
     if (!baseExists) {
       status = "new";
     } else if (managedEntry && managedEntry.sourceRoot === artifact.sourceRoot) {
-      installedHash = await hashArtifact(artifact.kind, basePath);
-      status = installedHash === sourceHash ? "installed-same" : "installed-different";
+      installedContent = await hashArtifactContent(artifact.kind, basePath);
+      status = installedContent.digest === sourceContent.digest ? "installed-same" : "installed-different";
     } else {
       status = "conflict";
       conflictReason = "A target path already exists but is not managed by this installer.";
       conflictPath = basePath;
-      installedHash = await hashArtifact(artifact.kind, basePath);
+      installedContent = await hashArtifactContent(artifact.kind, basePath);
     }
 
     // A basePath conflict blocks the whole artifact, so its exposures are never
@@ -434,8 +501,11 @@ export async function collectArtifactStates(
       artifact,
       id,
       basePath,
-      sourceHash,
-      installedHash,
+      sourceHash: sourceContent.digest,
+      installedHash: installedContent?.digest ?? null,
+      overlay,
+      sourceContent,
+      installedContent,
       exposurePlan,
       exposures,
       status,
@@ -470,14 +540,113 @@ export async function collectArtifactStates(
 }
 
 function saveEntries(paths: TargetPaths, entries: Map<string, ManagedEntry>): Promise<void> {
-  return saveState(paths, { version: 3, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
+  return saveState(paths, { version: 4, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
+}
+
+function sameExposureSet(left: ExposureRecord[], right: ExposureRecord[]): boolean {
+  const key = (exposure: ExposureRecord): string => `${exposure.targetName ?? ""}\n${exposure.path}`;
+  const leftKeys = new Set(left.map(key));
+  const rightKeys = new Set(right.map(key));
+  return leftKeys.size === rightKeys.size && [...leftKeys].every((item) => rightKeys.has(item));
+}
+
+interface SingleInstallResult {
+  entry: ManagedEntry;
+  disposition: Extract<InstallDisposition, "installed" | "updated" | "unchanged">;
+  exposureResults: ExposureInstallRecord[];
+  installedContent: ContentIdentity;
+}
+
+// Installs one reconciled artifact: writes the base copy when content drifted
+// (verifying the write afterward), skips the write when the copy already
+// verifies, and always converges the configured exposures best-effort. Throws
+// for basePath conflicts and for write/verification failures; a failed
+// exposure creation is reported, never thrown.
+async function executeArtifactInstall(
+  current: ArtifactState,
+  paths: TargetPaths,
+  entries: Map<string, ManagedEntry>
+): Promise<SingleInstallResult> {
+  if (current.status === "conflict") {
+    throw new Error(`Cannot install ${current.id}: ${current.conflictReason}`);
+  }
+
+  const expected = current.sourceContent;
+  const overlay = current.overlay;
+  const existingExposures = entries.get(current.id)?.exposures ?? [];
+  const needsWrite = current.installedContent === null || current.installedContent.digest !== expected.digest;
+
+  // Test seam for the failure-partway acceptance path (see docs/content-identity.md): fail before any write.
+  if (process.env.AGENT_INSTALLER_TEST_FAIL_WRITE === current.id) {
+    throw new InstallFailedError(
+      current.id,
+      "install-failed",
+      `Injected install failure for ${current.id} (AGENT_INSTALLER_TEST_FAIL_WRITE).`
+    );
+  }
+
+  if (!needsWrite) {
+    // Unchanged: verified, not written. Missing exposures are still repaired,
+    // and the state entry advances to this run's provenance, content identity
+    // and overlays whenever any of them (or the exposure set) actually changed.
+    const { exposures, results } = await applyExposurePlanDetailed(current.exposurePlan, current.basePath, existingExposures);
+    const previous = entries.get(current.id);
+    let entry: ManagedEntry;
+    if (previous !== undefined) {
+      const refreshed = refreshUnchangedEntry(previous, current, exposures);
+      if (refreshed !== null) {
+        entries.set(refreshed.id, refreshed);
+        await saveEntries(paths, entries);
+      }
+      entry = entries.get(current.id)!;
+    } else {
+      entry = buildManagedEntry(current.artifact, paths, expected, current.installedContent!, overlay, exposures);
+      entries.set(entry.id, entry);
+      await saveEntries(paths, entries);
+    }
+
+    return { entry, disposition: "unchanged", exposureResults: results, installedContent: current.installedContent! };
+  }
+
+  await copyArtifact(current.artifact, current.basePath);
+
+  // Test seam for the post-write verification acceptance path: corrupt the copy so it cannot match.
+  if (process.env.AGENT_INSTALLER_TEST_CORRUPT_WRITE === current.id) {
+    await corruptInstalledCopy(current.artifact.kind, current.basePath);
+  }
+
+  const installedContent = await hashArtifactContent(current.artifact.kind, current.basePath);
+  if (installedContent.digest !== expected.digest) {
+    // Record what is actually on disk, then stop the run like any other failure.
+    const entry = buildManagedEntry(current.artifact, paths, expected, installedContent, overlay, existingExposures);
+    entries.set(entry.id, entry);
+    await saveEntries(paths, entries);
+    throw new InstallFailedError(
+      current.id,
+      "verification-failed",
+      `Post-write verification failed for ${current.id}: the installed copy does not match the expected source content.`
+    );
+  }
+
+  const { exposures, results } = await applyExposurePlanDetailed(current.exposurePlan, current.basePath, existingExposures);
+  const entry = buildManagedEntry(current.artifact, paths, expected, installedContent, overlay, exposures);
+  await writeMarker(entry);
+  entries.set(entry.id, entry);
+  await saveEntries(paths, entries);
+
+  return {
+    entry,
+    disposition: current.status === "new" ? "installed" : "updated",
+    exposureResults: results,
+    installedContent
+  };
 }
 
 // Each artifact's base copy and every one of its target exposures are installed and
 // persisted before moving to the next artifact, so a mid-run crash never leaves more
 // than one artifact's state out of sync with what is actually on disk (multi-target
 // work within a single artifact is itself best-effort with no rollback; see
-// applyExposurePlan).
+// applyExposurePlanDetailed).
 export async function installArtifacts(states: ArtifactState[], home?: string): Promise<ManagedEntry[]> {
   const paths = resolveTargetPaths(home);
   const state = await loadState(paths);
@@ -485,24 +654,98 @@ export async function installArtifacts(states: ArtifactState[], home?: string): 
   const installed: ManagedEntry[] = [];
 
   for (const current of states) {
-    if (current.status === "conflict") {
-      throw new Error(`Cannot install ${current.id}: ${current.conflictReason}`);
-    }
-
-    await copyArtifact(current.artifact, current.basePath);
-
-    const installedHash = await hashArtifact(current.artifact.kind, current.basePath);
-    const existingExposures = entries.get(current.id)?.exposures ?? [];
-    const exposures = await applyExposurePlan(current.exposurePlan, current.basePath, existingExposures);
-    const entry = buildManagedEntry(current.artifact, paths, current.sourceHash, installedHash, exposures);
-    await writeMarker(entry);
-    entries.set(entry.id, entry);
-    installed.push(entry);
-
-    await saveEntries(paths, entries);
+    const result = await executeArtifactInstall(current, paths, entries);
+    installed.push(result.entry);
   }
 
   return installed;
+}
+
+// Advances one verified-but-unwritten entry to this run's provenance, content
+// identity and overlays without touching files, symlinks, markers, or
+// `installedAt`. Reconciliation already rehashed the Base Store copy and
+// compared it with this commit's expected source content, so recording this
+// run's `requestedRef`/`resolvedCommit`, the v2 hash algorithm and the real
+// overlays is safe. Returns the refreshed entry, or null when the stored entry
+// already matches this run on every refreshed field.
+function refreshUnchangedEntry(
+  existing: ManagedEntry,
+  current: ArtifactState,
+  exposures: ExposureRecord[]
+): ManagedEntry | null {
+  if (current.installedContent === null) {
+    return null;
+  }
+
+  const overlayRecords = current.overlay === null ? [] : [overlayToRecord(current.overlay)];
+  const requestedRef = current.artifact.requestedRef;
+  const resolvedCommit = current.artifact.resolvedCommit;
+  if (
+    sameExposureSet(existing.exposures, exposures) &&
+    existing.sourceHash === current.sourceContent.digest &&
+    existing.installedHash === current.installedContent.digest &&
+    existing.hashAlgorithm === current.sourceContent.algorithm &&
+    existing.requestedRef === requestedRef &&
+    existing.resolvedCommit === resolvedCommit &&
+    JSON.stringify(existing.overlays) === JSON.stringify(overlayRecords)
+  ) {
+    return null;
+  }
+
+  const refreshed: ManagedEntry = {
+    ...existing,
+    exposures,
+    sourceHash: current.sourceContent.digest,
+    installedHash: current.installedContent.digest,
+    hashAlgorithm: current.sourceContent.algorithm,
+    overlays: overlayRecords,
+    requestedRef,
+    resolvedCommit
+  };
+  if (requestedRef === undefined) {
+    delete refreshed.requestedRef;
+  }
+  if (resolvedCommit === undefined) {
+    delete refreshed.resolvedCommit;
+  }
+
+  return refreshed;
+}
+
+// Refreshes provenance for selected artifacts that reconciled as `installed-same`
+// during this run. Pure installed-same artifacts never pass through
+// executeArtifactInstall, so their entries advance here; each refreshed entry
+// is persisted as it completes, bounding a mid-run crash to at most one unsaved
+// artifact. Local sources carry no Git provenance, so callers must only invoke
+// this for remote sources.
+async function refreshUnchangedProvenance(selectedStates: ArtifactState[], home?: string): Promise<void> {
+  const candidates = selectedStates.filter(
+    (state) => state.status === "installed-same" && state.managedEntry !== null && state.installedContent !== null
+  );
+  if (candidates.length === 0) {
+    return;
+  }
+
+  const paths = resolveTargetPaths(home);
+  const state = await loadState(paths);
+  const entries = new Map(state.entries.map((entry) => [entry.id, entry]));
+
+  for (const current of candidates) {
+    const existing = entries.get(current.id);
+    if (!existing) {
+      continue;
+    }
+
+    // Pure installed-same artifacts keep every owned exposure as-is; only the
+    // recorded provenance/identity/overlays advance to this run.
+    const refreshed = refreshUnchangedEntry(existing, current, existing.exposures);
+    if (refreshed === null) {
+      continue;
+    }
+
+    entries.set(refreshed.id, refreshed);
+    await saveEntries(paths, entries);
+  }
 }
 
 export interface RemoveArtifactsResult {
@@ -561,6 +804,16 @@ export interface InstallAllOptions {
   prune?: boolean;
 }
 
+export interface InstallRequest {
+  sourcePath: string;
+  home?: string | undefined;
+  scanOptions?: ScanSourceOptions | undefined;
+  resolveOptions?: ResolveSourceOptions | undefined;
+  allowConflicts?: boolean | undefined;
+  only?: string[] | undefined;
+  prune?: boolean | undefined;
+}
+
 export interface InstallAllResult {
   states: ArtifactState[];
   installed: ManagedEntry[];
@@ -568,6 +821,401 @@ export interface InstallAllResult {
   exposureConflicts: ExposureConflictSummary[];
   pruned: RemovedArtifactState[];
   prunedSkippedExposures: SkippedExposureRemoval[];
+  outcome: InstallOutcome;
+}
+
+function nullProvenance(value: string | undefined): string | null {
+  return value ?? null;
+}
+
+function baseOutcomeRecord(
+  paths: TargetPaths,
+  state: ArtifactState,
+  disposition: InstallArtifactOutcome["disposition"]
+): InstallArtifactOutcome {
+  return {
+    id: state.id,
+    kind: state.artifact.kind,
+    name: state.artifact.name,
+    sourceIdentity: state.artifact.sourceRoot,
+    relativeSourcePath: state.artifact.relativeSourcePath,
+    status: state.status,
+    disposition,
+    exposures: [],
+    basePath: state.basePath,
+    storeRelativePath: getStoreRelativePath(state.artifact),
+    requestedRef: nullProvenance(state.artifact.requestedRef),
+    resolvedCommit: nullProvenance(state.artifact.resolvedCommit),
+    overlays: []
+  };
+}
+
+function unchangedOutcomeRecord(paths: TargetPaths, state: ArtifactState): InstallArtifactOutcome {
+  const installedContent = state.installedContent!;
+  return {
+    ...baseOutcomeRecord(paths, state, "unchanged"),
+    exposures: state.exposurePlan.map((entry) => ({
+      targetName: entry.targetName,
+      path: entry.path,
+      result: "present" as const
+    })),
+    content: {
+      algorithm: state.sourceContent.algorithm,
+      expectedHash: state.sourceContent.digest,
+      installedHash: installedContent.digest
+    },
+    files: installedContent.files,
+    overlays: state.overlay === null ? [] : [overlayToRecord(state.overlay)]
+  };
+}
+
+function installedOutcomeRecord(
+  paths: TargetPaths,
+  state: ArtifactState,
+  result: SingleInstallResult
+): InstallArtifactOutcome {
+  const expected = state.sourceContent;
+  return {
+    ...baseOutcomeRecord(paths, state, result.disposition),
+    exposures: result.exposureResults,
+    content: {
+      algorithm: expected.algorithm,
+      expectedHash: expected.digest,
+      installedHash: result.installedContent.digest
+    },
+    // The inventory always describes what actually verified on disk.
+    files: result.installedContent.files,
+    overlays: state.overlay === null ? [] : [overlayToRecord(state.overlay)]
+  };
+}
+
+function failedOutcomeRecord(
+  paths: TargetPaths,
+  state: ArtifactState,
+  code: InstallErrorCode,
+  message: string,
+  installedContent: ContentIdentity | null
+): InstallArtifactOutcome {
+  const record = baseOutcomeRecord(paths, state, "failed");
+  if (installedContent !== null) {
+    record.content = {
+      algorithm: state.sourceContent.algorithm,
+      expectedHash: state.sourceContent.digest,
+      installedHash: installedContent.digest
+    };
+    record.files = installedContent.files;
+  }
+  if (state.overlay !== null) {
+    record.overlays = [overlayToRecord(state.overlay)];
+  }
+  record.failure = { code, message };
+  return record;
+}
+
+function classifyInstallFailure(error: unknown, id: string): { code: InstallErrorCode; message: string } {
+  if (error instanceof InstallFailedError) {
+    return { code: error.code, message: error.message };
+  }
+
+  if (error instanceof SourceConfigurationError) {
+    return { code: "source-configuration", message: error.message };
+  }
+
+  return { code: "install-failed", message: error instanceof Error ? error.message : String(error) };
+}
+
+function computeExposureSummary(
+  config: AgentInstallerConfig | null,
+  selectedStates: ArtifactState[],
+  exposureResults: ExposureInstallRecord[],
+  retainedPruneExposures: number
+): InstallExposureSummary {
+  const requestedKinds = new Set(selectedStates.map((state) => state.artifact.kind));
+  if (config === null || requestedKinds.size === 0) {
+    return "not-configured";
+  }
+
+  const declaredKinds = new Set<ArtifactKind>();
+  for (const target of Object.values(config.targets)) {
+    if (target.skills !== undefined) {
+      declaredKinds.add("skill");
+    }
+
+    if (target.prompts !== undefined) {
+      declaredKinds.add("prompt");
+    }
+  }
+
+  if (![...requestedKinds].some((kind) => declaredKinds.has(kind))) {
+    return "not-configured";
+  }
+
+  const troubled = exposureResults.some((result) => result.result === "conflict" || result.result === "failed");
+  return troubled || retainedPruneExposures > 0 ? "partial" : "complete";
+}
+
+function buildErrorOutcome(
+  paths: TargetPaths,
+  code: InstallErrorCode,
+  message: string,
+  extra?: Partial<InstallOutcome>
+): InstallOutcome {
+  return {
+    schemaVersion: 3,
+    kind: "agent-installer.install-report",
+    baseStore: { skills: paths.agentsSkillsDir, prompts: paths.agentsPromptsDir },
+    outcome: "aborted",
+    exposureOutcome: "not-configured",
+    artifacts: [],
+    unmatchedSelectors: [],
+    pruned: [],
+    error: { code, message },
+    ...extra
+  };
+}
+
+/**
+ * Runs a full install and returns the versioned, complete Install Outcome:
+ * exactly one record per requested artifact on success and on every failure
+ * path. Classified failures (unmatched selectors, strict conflicts, mid-run
+ * failures) are encoded in the outcome, never thrown; source, config, and
+ * scan errors still throw for the caller to classify.
+ */
+export async function runInstall(request: InstallRequest): Promise<InstallAllResult> {
+  const paths = resolveTargetPaths(request.home);
+  const config = await loadConfig(paths, request.home);
+  const { scanSourceRepository } = await import("./source.js");
+  const source = await resolveSourceInput(request.sourcePath, request.resolveOptions);
+
+  try {
+    const artifacts = (await scanSourceRepository(source.scanRoot, request.scanOptions)).map((artifact) => ({
+      ...artifact,
+      sourceRoot: source.sourceIdentity,
+      requestedRef: source.requestedRef,
+      resolvedCommit: source.resolvedCommit
+    }));
+    const { states, removed } = await collectArtifactStates(artifacts, request.home, source.sourceIdentity);
+
+    const empty: Omit<InstallAllResult, "states" | "outcome"> = {
+      installed: [],
+      conflicts: [],
+      exposureConflicts: [],
+      pruned: [],
+      prunedSkippedExposures: []
+    };
+
+    // --only selection: unmatched selectors abort before anything is installed,
+    // with every matched artifact recorded as not-attempted.
+    let selectedStates: ArtifactState[];
+    let unmatchedSelectors: string[] = [];
+    if (request.only !== undefined) {
+      const partitioned = partitionSelectors(states, request.only);
+      unmatchedSelectors = partitioned.unmatched;
+      selectedStates = partitioned.matched;
+      if (unmatchedSelectors.length > 0) {
+        const outcome: InstallOutcome = {
+          ...buildErrorOutcome(paths, "unmatched-selector", `No discovered artifact matches: ${unmatchedSelectors.join(", ")}`, {
+            exposureOutcome: computeExposureSummary(config, selectedStates, [], 0)
+          }),
+          artifacts: selectedStates.map((state) => baseOutcomeRecord(paths, state, "not-attempted")),
+          unmatchedSelectors
+        };
+        return { states, ...empty, outcome };
+      }
+    } else {
+      selectedStates = states;
+    }
+
+    const { installable, conflicts } = partitionInstallAllStates(selectedStates);
+    const exposureConflicts = collectExposureConflicts(selectedStates);
+
+    // Strict-mode refusal: nothing is installed; base conflicts record as
+    // conflict with no exposures (never evaluated), exposure conflicts record
+    // as conflict with their pairs structured in exposures[].
+    if ((conflicts.length > 0 || exposureConflicts.length > 0) && request.allowConflicts !== true) {
+      const exposureConflictIds = new Set(exposureConflicts.map((conflict) => conflict.id));
+      const outcome: InstallOutcome = {
+        ...buildErrorOutcome(paths, "conflict", conflictMessage(conflicts, exposureConflicts), {
+          exposureOutcome: computeExposureSummary(
+            config,
+            selectedStates,
+            exposureConflicts.map((conflict) => ({
+              targetName: conflict.targetName,
+              path: conflict.path,
+              result: "conflict" as const,
+              reason: conflict.reason
+            })),
+            0
+          )
+        }),
+        artifacts: selectedStates.map((state) => {
+          if (state.status === "conflict") {
+            return baseOutcomeRecord(paths, state, "conflict");
+          }
+
+          if (exposureConflictIds.has(state.id)) {
+            const record = baseOutcomeRecord(paths, state, "conflict");
+            record.exposures = state.exposurePlan
+              .filter((entry) => entry.status === "conflict")
+              .map((entry) => ({
+                targetName: entry.targetName,
+                path: entry.path,
+                result: "conflict" as const,
+                reason: entry.reason ?? "conflict"
+              }));
+            return record;
+          }
+
+          return baseOutcomeRecord(paths, state, "not-attempted");
+        })
+      };
+      return { states, installed: [], conflicts, exposureConflicts, pruned: [], prunedSkippedExposures: [], outcome };
+    }
+
+    // Sequential install in selected order: each artifact's base copy and
+    // exposures persist before moving on, so a mid-run failure leaves at most
+    // one artifact out of sync. The first failure stops the run; everything
+    // already written keeps its real disposition.
+    const state = await loadState(paths);
+    const entries = new Map(state.entries.map((entry) => [entry.id, entry]));
+    const installed: ManagedEntry[] = [];
+    const recordsById = new Map<string, InstallArtifactOutcome>();
+    let failure: { state: ArtifactState; code: InstallErrorCode; message: string; installedContent: ContentIdentity | null } | null =
+      null;
+
+    for (const current of installable) {
+      try {
+        const result = await executeArtifactInstall(current, paths, entries);
+        installed.push(result.entry);
+        recordsById.set(current.id, installedOutcomeRecord(paths, current, result));
+      } catch (error) {
+        const classified = classifyInstallFailure(error, current.id);
+        let installedContent: ContentIdentity | null = null;
+        if (classified.code === "verification-failed") {
+          try {
+            installedContent = await hashArtifactContent(current.artifact.kind, current.basePath);
+          } catch {
+            installedContent = null;
+          }
+        }
+
+        failure = { state: current, code: classified.code, message: classified.message, installedContent };
+        break;
+      }
+    }
+
+    if (failure !== null) {
+      const outcome: InstallOutcome = {
+        ...buildErrorOutcome(paths, failure.code, failure.message, {
+          exposureOutcome: computeExposureSummary(
+            config,
+            selectedStates,
+            [...recordsById.values()].flatMap((record) => record.exposures),
+            0
+          )
+        }),
+        artifacts: selectedStates.map((selected) => {
+          const done = recordsById.get(selected.id);
+          if (done !== undefined) {
+            return done;
+          }
+
+          if (selected.id === failure!.state.id) {
+            return failedOutcomeRecord(paths, selected, failure!.code, failure!.message, failure!.installedContent);
+          }
+
+          if (selected.status === "conflict") {
+            return baseOutcomeRecord(paths, selected, "conflict");
+          }
+
+          // Installed-same artifacts need no write, so a failure elsewhere leaves
+          // them verified-but-unreached: on an aborted run every non-implicated
+          // record reads as not-attempted.
+          return baseOutcomeRecord(paths, selected, "not-attempted");
+        })
+      };
+      return { states, installed, conflicts, exposureConflicts, pruned: [], prunedSkippedExposures: [], outcome };
+    }
+
+    // A selected artifact that reconciled as `installed-same` verified this run's
+    // content by rehashing the Base Store copy, so its entry records this run's
+    // Git provenance (plus the v2 hash algorithm and real overlays) without
+    // rewriting files, symlinks, markers, or `installedAt`. Local sources carry
+    // no Git provenance and are left byte-for-byte unchanged. Bumped
+    // installed-different artifacts with matching content already advanced
+    // through executeArtifactInstall above.
+    if (source.resolvedCommit !== undefined) {
+      await refreshUnchangedProvenance(selectedStates, request.home);
+    }
+
+    for (const current of selectedStates) {
+      if (recordsById.has(current.id)) {
+        continue;
+      }
+
+      if (current.status === "conflict") {
+        recordsById.set(current.id, baseOutcomeRecord(paths, current, "conflict"));
+      } else if (current.status === "installed-same") {
+        recordsById.set(current.id, unchangedOutcomeRecord(paths, current));
+      }
+    }
+
+    let pruned: RemovedArtifactState[] = [];
+    let prunedSkippedExposures: SkippedExposureRemoval[] = [];
+    let prunedOutcomes: InstallPrunedOutcome[] = [];
+    if (request.prune === true && removed.length > 0) {
+      const pruneResult = await removeArtifacts(removed.map((entry) => entry.id), request.home);
+      pruned = removed;
+      prunedSkippedExposures = pruneResult.skippedExposures;
+      const skippedById = new Map<string, Set<string>>();
+      for (const skipped of prunedSkippedExposures) {
+        const paths = skippedById.get(skipped.id) ?? new Set<string>();
+        paths.add(skipped.path);
+        skippedById.set(skipped.id, paths);
+      }
+
+      prunedOutcomes = removed.map((entry) => {
+        const retained = skippedById.get(entry.id) ?? new Set<string>();
+        return {
+          id: entry.id,
+          basePath: entry.basePath,
+          storeRelativePath: getStoreRelativePath(entry),
+          requestedRef: nullProvenance(entry.managedEntry.requestedRef),
+          resolvedCommit: nullProvenance(entry.managedEntry.resolvedCommit),
+          removedExposures: entry.managedEntry.exposures
+            .filter((exposure) => !retained.has(exposure.path))
+            .map((exposure) => ({ path: exposure.path, targetName: exposure.targetName })),
+          retainedExposures: entry.managedEntry.exposures
+            .filter((exposure) => retained.has(exposure.path))
+            .map((exposure) => ({ path: exposure.path, targetName: exposure.targetName }))
+        };
+      });
+    }
+
+    const records = selectedStates.map((selected) => recordsById.get(selected.id)!);
+    const runOutcome: InstallRunOutcome = records.some((record) => record.disposition === "conflict")
+      ? "partial"
+      : "complete";
+    const outcome: InstallOutcome = {
+      schemaVersion: 3,
+      kind: "agent-installer.install-report",
+      baseStore: { skills: paths.agentsSkillsDir, prompts: paths.agentsPromptsDir },
+      outcome: runOutcome,
+      exposureOutcome: computeExposureSummary(
+        config,
+        selectedStates,
+        records.flatMap((record) => record.exposures),
+        prunedOutcomes.reduce((count, pruned) => count + pruned.retainedExposures.length, 0)
+      ),
+      artifacts: records,
+      unmatchedSelectors,
+      pruned: prunedOutcomes
+    };
+
+    return { states, installed, conflicts, exposureConflicts, pruned, prunedSkippedExposures, outcome };
+  } finally {
+    await source.cleanup();
+  }
 }
 
 export async function installAllFromSource(
@@ -577,40 +1225,31 @@ export async function installAllFromSource(
   resolveOptions?: ResolveSourceOptions,
   installOptions?: InstallAllOptions
 ): Promise<InstallAllResult> {
-  const { scanSourceRepository } = await import("./source.js");
-  // Validated before touching the source, so a malformed config.yaml aborts before a
-  // remote source is cloned rather than after paying for the clone.
-  await loadConfig(resolveTargetPaths(home), home);
-  const source = await resolveSourceInput(sourcePath, resolveOptions);
+  const result = await runInstall({
+    sourcePath,
+    home,
+    scanOptions,
+    resolveOptions,
+    allowConflicts: installOptions?.allowConflicts,
+    only: installOptions?.only,
+    prune: installOptions?.prune
+  });
 
-  try {
-    const artifacts = (await scanSourceRepository(source.scanRoot, scanOptions)).map((artifact) => ({
-      ...artifact,
-      sourceRoot: source.sourceIdentity,
-      requestedRef: source.requestedRef,
-      resolvedCommit: source.resolvedCommit
-    }));
-    const { states, removed } = await collectArtifactStates(artifacts, home, source.sourceIdentity);
-    const selectedStates = installOptions?.only === undefined ? states : selectStates(states, installOptions.only);
-    const { installable, conflicts } = partitionInstallAllStates(selectedStates);
-    const exposureConflicts = collectExposureConflicts(selectedStates);
-
-    if ((conflicts.length > 0 || exposureConflicts.length > 0) && installOptions?.allowConflicts !== true) {
-      throw new InstallConflictError(conflicts, exposureConflicts);
-    }
-
-    const installed = await installArtifacts(installable, home);
-
-    let pruned: RemovedArtifactState[] = [];
-    let prunedSkippedExposures: SkippedExposureRemoval[] = [];
-    if (installOptions?.prune === true && removed.length > 0) {
-      const pruneResult = await removeArtifacts(removed.map((entry) => entry.id), home);
-      pruned = removed;
-      prunedSkippedExposures = pruneResult.skippedExposures;
-    }
-
-    return { states, installed, conflicts, exposureConflicts, pruned, prunedSkippedExposures };
-  } finally {
-    await source.cleanup();
+  // The legacy paths keep their throw semantics: v2 JSON and human-readable
+  // output are built from the thrown error plus the returned fields, exactly
+  // as before. Only v3 reads result.outcome directly.
+  if (result.outcome.error?.code === "unmatched-selector") {
+    throw new UnmatchedSelectorsError(result.outcome.unmatchedSelectors);
   }
+
+  if (result.outcome.outcome === "aborted" && result.outcome.error?.code === "conflict") {
+    throw new InstallConflictError(result.conflicts, result.exposureConflicts);
+  }
+
+  const failed = result.outcome.artifacts.find((record) => record.disposition === "failed");
+  if (failed?.failure !== undefined) {
+    throw new InstallFailedError(failed.id, failed.failure.code as InstallFailedError["code"], failed.failure.message);
+  }
+
+  return result;
 }

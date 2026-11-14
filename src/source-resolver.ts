@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { SourceUnavailableError } from "./errors.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,8 +30,126 @@ async function defaultGitRunner(args: string[], cwd?: string): Promise<string> {
     return stdout;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`git ${args.join(" ")} failed: ${message}`);
+    // The child-process message echoes the raw argv (including any credentialed
+    // source URL). Strip userinfo and query/fragment from any https URL it
+    // contains so the default runner never leaks credentials on its own. The
+    // resolveSourceInput wrapper below redacts exact secrets as well.
+    throw new Error(redactGenericGitSecrets(message));
   }
+}
+
+function redactGenericGitSecrets(message: string): string {
+  let out = message;
+  // Strip `user[:pass]@` from any http(s) URL, keeping the rest of the URL.
+  out = out.replace(/(https?:\/\/)[^\s/@]*@/g, "$1");
+  // Strip the query string and/or fragment from any http(s) URL in one pass.
+  out = out.replace(/(https?:\/\/[^\s"'`\]\)?#]+?)([?#][^\s"'`\]\)]*)/g, "$1");
+  return out;
+}
+
+function encodingVariants(value: string): string[] {
+  const variants = [value];
+  try {
+    const decoded = decodeURIComponent(value);
+    if (decoded.length > 0 && decoded !== value) {
+      variants.push(decoded);
+    }
+  } catch {
+    // Not percent-encoded; nothing to add.
+  }
+  try {
+    const encoded = encodeURIComponent(value);
+    if (encoded.length > 0 && encoded !== value) {
+      variants.push(encoded);
+    }
+  } catch {
+    // Nothing to add.
+  }
+  return variants;
+}
+
+function collectSecretValues(input: string): string[] {
+  const secrets: string[] = [];
+  const addSecretVariant = (value: string): void => {
+    if (value.length === 0) {
+      return;
+    }
+    secrets.push(...encodingVariants(value));
+  };
+
+  try {
+    const url = new URL(input);
+    if (url.password.length > 0) {
+      addSecretVariant(url.password);
+    }
+    url.searchParams.forEach((value) => {
+      addSecretVariant(value);
+    });
+    if (url.search.length > 1) {
+      addSecretVariant(url.search);
+      addSecretVariant(url.search.slice(1));
+    }
+    if (url.hash.length > 1) {
+      addSecretVariant(url.hash);
+      addSecretVariant(url.hash.slice(1));
+    }
+  } catch {
+    // Not a URL; nothing secret to extract.
+  }
+
+  // Only redact substrings long enough to avoid mangling ordinary prose.
+  // Short secrets (and the username, which can be a common word) are covered
+  // by the exact-URL replacement and the credential-context patterns below.
+  return [...new Set(secrets)].filter((secret) => secret.length >= 3).sort((a, b) => b.length - a.length);
+}
+
+function redactSourceSecretsFromDetail(detail: string, rawInput: string, displayUrl: string): string {
+  let out = detail;
+
+  if (rawInput.length > 0) {
+    out = out.split(rawInput).join(displayUrl);
+  }
+
+  try {
+    const url = new URL(rawInput);
+    const { username, password } = url;
+    if (username.length > 0 && password.length > 0) {
+      const combo = `${username}:${password}`;
+      if (combo.length > 0) {
+        out = out.split(combo).join("[redacted]");
+      }
+      try {
+        const decodedCombo = `${decodeURIComponent(username)}:${decodeURIComponent(password)}`;
+        if (decodedCombo.length > 0 && decodedCombo !== combo) {
+          out = out.split(decodedCombo).join("[redacted]");
+        }
+      } catch {
+        // Nothing to add.
+      }
+    }
+    if (username.length > 0) {
+      // Redact the username only in credentialed contexts (`USER:` / `USER@`)
+      // so a common-word username never mangles unrelated prose like "git".
+      // A bare username echoed outside a URL is out of scope: git's own
+      // diagnostics either echo the full URL (replaced above) or omit it.
+      const variants = new Set(encodingVariants(username));
+      for (const variant of variants) {
+        if (variant.length === 0) {
+          continue;
+        }
+        out = out.split(`${variant}:`).join("[redacted]:");
+        out = out.split(`${variant}@`).join("[redacted]@");
+      }
+    }
+  } catch {
+    // Not a URL; fall through to generic redaction.
+  }
+
+  for (const secret of collectSecretValues(rawInput)) {
+    out = out.split(secret).join("[redacted]");
+  }
+
+  return redactGenericGitSecrets(out);
 }
 
 export function isHttpsGitSource(input: string): boolean {
@@ -64,7 +183,14 @@ export async function resolveSourceInput(inputPath?: string, options: ResolveSou
       throw new Error("--ref can only be used with an HTTPS Git source.");
     }
 
-    const scanRoot = await fs.realpath(path.resolve(input));
+    let scanRoot: string;
+    try {
+      scanRoot = await fs.realpath(path.resolve(input));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new SourceUnavailableError(`Cannot read source repository at ${input}: ${detail}`);
+    }
+
     return {
       scanRoot,
       sourceIdentity: scanRoot,
@@ -74,7 +200,26 @@ export async function resolveSourceInput(inputPath?: string, options: ResolveSou
 
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-installer-git-"));
   const scanRoot = path.join(tempDir, "repo");
-  const git = options.git ?? defaultGitRunner;
+  const sourceIdentity = sanitizeRemoteSourceIdentity(input);
+  const displayUrl = sourceIdentity.replace(/^git\+/, "");
+  const rawGit = options.git ?? defaultGitRunner;
+
+  // Every git failure is re-thrown with credentialed parts redacted, so all
+  // callers (scan, install, interactive, --json) get safe diagnostics without
+  // per-command handling. The message keeps the failed operation, the
+  // sanitized source, the requested ref when there is one, and git's own
+  // (redacted) stderr explanation.
+  const git: GitRunner = async (args, cwd) => {
+    try {
+      return await rawGit(args, cwd);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const redactedDetail = redactSourceSecretsFromDetail(detail, input, displayUrl);
+      const operation = args[0] ?? "git";
+      const refSuffix = options.ref === undefined ? "" : ` (ref ${options.ref})`;
+      throw new SourceUnavailableError(`git ${operation} for ${sourceIdentity}${refSuffix} failed: ${redactedDetail}`);
+    }
+  };
 
   try {
     await git(["clone", "--depth", "1", input, scanRoot]);
@@ -87,7 +232,7 @@ export async function resolveSourceInput(inputPath?: string, options: ResolveSou
 
     return {
       scanRoot,
-      sourceIdentity: sanitizeRemoteSourceIdentity(input),
+      sourceIdentity,
       requestedRef: options.ref,
       resolvedCommit,
       cleanup: async () => {

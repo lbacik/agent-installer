@@ -63,3 +63,27 @@ _Avoid_: patch, generated cache
 **Source Path**:
 The display provenance for an artifact inside its source repository, shown as the source identity plus the artifact's relative source path. For remote Git sources, this is not necessarily a live filesystem path after installation.
 _Avoid_: destination, install path
+
+**Requested Artifact**:
+Every discovered artifact under `--all`, or exactly the artifacts matched by `--only`. A v3 install report records exactly one outcome per requested artifact, on success and on every failure path.
+_Avoid_: selected item, install candidate
+
+**Disposition**:
+What one install run did to a single requested artifact's Base Store copy only, never its Tool Exposures: `installed`, `updated`, `unchanged`, `conflict`, `failed`, or `not-attempted`.
+_Avoid_: install status, outcome flag
+
+**Install Outcome**:
+The versioned, complete, machine-readable result of one install run: one outcome record per requested artifact plus run-level summaries. Rendered to JSON from the value alone, with no further filesystem reads.
+_Avoid_: install result, report blob
+
+**Content Identity**:
+The freshly verified identity of one artifact copy: the hash `algorithm` that produced the digest, the digest itself, and the complete per-file inventory it was computed from.
+_Avoid_: content hash, checksum
+
+**Expected Hash**:
+The source files of an artifact plus any installer Overlays, hashed with the artifact's content-identity algorithm. It is not a pristine upstream-tree hash and must never be presented as one.
+_Avoid_: source hash, upstream hash
+
+**Offline Verification**:
+Checking that explicitly requested managed artifacts' base-store copies still match their recorded content identity, without contacting their source repository and without changing anything. It reports each artifact's recorded provenance as it was recorded; it never proves what the source currently contains.
+_Avoid_: audit, health check, fresh verification
