@@ -108,4 +108,62 @@ describe("source resolver", () => {
     await expect(resolveSourceInput("https://github.com/org/repo.git", { ref: "missing", git })).rejects.toThrow("missing ref");
     await expect(fs.access(scanRoot)).rejects.toMatchObject({ code: "ENOENT" });
   });
+
+  it("redacts credentials from a failed clone diagnostic", async () => {
+    const rawUrl = "https://USER:SECRET@github.com/org/repo.git?token=QSECRET";
+    const git: GitRunner = async (args) => {
+      const scanRoot = args[4] ?? "/tmp/repo";
+      // Mimic the default runner: the thrown message echoes the raw argv.
+      throw new Error(
+        `Command failed: git ${args.join(" ")}\nCloning into '${scanRoot}'...\nfatal: unable to access '${rawUrl}/': Failed to connect`
+      );
+    };
+
+    const error = await resolveSourceInput(rawUrl, { git }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).not.toContain("USER:");
+    expect(message).not.toContain("SECRET");
+    expect(message).not.toContain("QSECRET");
+    expect(message).not.toContain("token=");
+    expect(message).toMatch(/clone/);
+    expect(message).toContain("git+https://github.com/org/repo.git");
+    expect(message).toMatch(/Failed to connect/);
+  });
+
+  it("redacts credentials when the --ref fetch fails after a successful clone", async () => {
+    const rawUrl = "https://USER:SECRET@github.com/org/repo.git?token=QSECRET";
+    const git: GitRunner = async (args) => {
+      if (args[0] === "clone") {
+        await fs.mkdir(args[4] ?? "", { recursive: true });
+        return "";
+      }
+      if (args[0] === "fetch") {
+        throw new Error(`Command failed: git fetch ${args.slice(1).join(" ")} from '${rawUrl}': Authentication failed`);
+      }
+      return "";
+    };
+
+    const error = await resolveSourceInput(rawUrl, { ref: "v9.9.9", git }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).not.toContain("USER:");
+    expect(message).not.toContain("SECRET");
+    expect(message).not.toContain("QSECRET");
+    expect(message).toMatch(/fetch/);
+    expect(message).toContain("git+https://github.com/org/repo.git");
+    expect(message).toContain("v9.9.9");
+    expect(message).toMatch(/Authentication failed/);
+  });
+
+  it("redacts credentials from a real unreachable clone without an injected runner", async () => {
+    const rawUrl = "https://USER:SECRET@127.0.0.1:1/org/repo.git?token=QSECRET";
+    const error = await resolveSourceInput(rawUrl).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).not.toContain("USER:");
+    expect(message).not.toContain("SECRET");
+    expect(message).not.toContain("QSECRET");
+    expect(message).toContain("git+https://127.0.0.1:1/org/repo.git");
+  }, 30000);
 });

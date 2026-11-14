@@ -1333,3 +1333,67 @@ describe("content hashing", () => {
     }
   });
 });
+
+describe("credentialed remote source sanitization", () => {
+  it("persists only the sanitized identity after installing from a credential-bearing URL", async () => {
+    const home = await makeTempDir("agent-installer-home-");
+    const rawUrl = "https://USER:SECRET@github.com/org/repo.git?token=QSECRET";
+    const resolvedCommit = "e".repeat(40);
+    const git: GitRunner = async (args) => {
+      if (args[0] === "clone") {
+        const checkout = args[4] ?? "";
+        await fs.mkdir(path.join(checkout, "skills", "review"), { recursive: true });
+        await fs.writeFile(path.join(checkout, "skills", "review", "SKILL.md"), "# Review\n", "utf8");
+        return "";
+      }
+      if (args[0] === "rev-parse") {
+        return `${resolvedCommit}\n`;
+      }
+      return "";
+    };
+
+    const { states } = await installAllFromSource(rawUrl, home, undefined, { git });
+
+    expect(states.map((state) => state.id)).toEqual(["skill:review"]);
+    const paths = resolveTargetPaths(home);
+    const rawState = await fs.readFile(paths.stateFile, "utf8");
+    expect(rawState).not.toContain("USER:");
+    expect(rawState).not.toContain("SECRET");
+    expect(rawState).not.toContain("QSECRET");
+    expect(rawState).toContain("git+https://github.com/org/repo.git");
+
+    const state = await loadState(paths);
+    for (const entry of state.entries) {
+      expect(entry.sourceRoot).toBe("git+https://github.com/org/repo.git");
+    }
+
+    const { buildListJson } = await import("../src/json-report.js");
+    const listJson = JSON.stringify(await buildListJson(state.entries));
+    expect(listJson).not.toContain("USER:");
+    expect(listJson).not.toContain("SECRET");
+    expect(listJson).not.toContain("QSECRET");
+  });
+
+  it("reports redacted git failures as JSON errors without credentials", async () => {
+    const rawUrl = "https://USER:SECRET@github.com/org/repo.git?token=QSECRET";
+    const git: GitRunner = async (args) => {
+      const scanRoot = args[4] ?? "/tmp/repo";
+      throw new Error(`Command failed: git ${args.join(" ")}\nCloning into '${scanRoot}'...\nfatal: Authentication failed for '${rawUrl}'`);
+    };
+
+    const { buildArtifactsErrorJson, buildInstallErrorJson } = await import("../src/json-report.js");
+    const { resolveSourceInput } = await import("../src/source-resolver.js");
+    const error = await resolveSourceInput(rawUrl, { git }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+
+    const scanJson = JSON.stringify(buildArtifactsErrorJson(error));
+    expect(scanJson).not.toContain("USER:");
+    expect(scanJson).not.toContain("SECRET");
+    expect(scanJson).not.toContain("QSECRET");
+
+    const installJson = JSON.stringify(buildInstallErrorJson(error));
+    expect(installJson).not.toContain("USER:");
+    expect(installJson).not.toContain("SECRET");
+    expect(installJson).not.toContain("QSECRET");
+  });
+});
