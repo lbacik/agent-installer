@@ -110,7 +110,7 @@ describe("source resolver", () => {
   });
 
   it("redacts credentials from a failed clone diagnostic", async () => {
-    const rawUrl = "https://USER:SECRET@github.com/org/repo.git?token=QSECRET";
+    const rawUrl = "https://USER:SECRET@github.com/org/repo.git?token=QSECRET#FRAGSECRET";
     const git: GitRunner = async (args) => {
       const scanRoot = args[4] ?? "/tmp/repo";
       // Mimic the default runner: the thrown message echoes the raw argv.
@@ -125,6 +125,7 @@ describe("source resolver", () => {
     expect(message).not.toContain("USER:");
     expect(message).not.toContain("SECRET");
     expect(message).not.toContain("QSECRET");
+    expect(message).not.toContain("FRAGSECRET");
     expect(message).not.toContain("token=");
     expect(message).toMatch(/clone/);
     expect(message).toContain("git+https://github.com/org/repo.git");

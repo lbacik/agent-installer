@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { collectLegacyNotices } from "../src/format.js";
 import { hashArtifact } from "../src/hash.js";
 import { collectArtifactStates, installAllFromSource, installArtifacts, removeArtifacts } from "../src/install.js";
-import { resolveTargetPaths } from "../src/paths.js";
+import { getMarkerPath, resolveTargetPaths } from "../src/paths.js";
 import { scanSourceRepository } from "../src/source.js";
 import { loadState, saveState } from "../src/state.js";
 import type { GitRunner } from "../src/source-resolver.js";
@@ -1372,6 +1372,13 @@ describe("credentialed remote source sanitization", () => {
     expect(listJson).not.toContain("USER:");
     expect(listJson).not.toContain("SECRET");
     expect(listJson).not.toContain("QSECRET");
+
+    for (const entry of state.entries) {
+      const marker = await fs.readFile(getMarkerPath(entry.basePath, entry.kind), "utf8");
+      expect(marker).not.toContain("USER:");
+      expect(marker).not.toContain("SECRET");
+      expect(marker).not.toContain("QSECRET");
+    }
   });
 
   it("reports redacted git failures as JSON errors without credentials", async () => {

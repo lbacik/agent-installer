@@ -41,52 +41,56 @@ function redactGenericGitSecrets(message: string): string {
   let out = message;
   // Strip `user[:pass]@` from any http(s) URL, keeping the rest of the URL.
   out = out.replace(/(https?:\/\/)[^\s/@]*@/g, "$1");
-  // Strip query strings and fragments from any http(s) URL.
-  out = out.replace(/(https?:\/\/[^\s?#"'`\]\)]+)\?[^\s"'`\]\)]*/g, "$1");
-  out = out.replace(/(https?:\/\/[^\s#"'`\]\)]+)#[^\s"'`\]\)]*/g, "$1");
+  // Strip the query string and/or fragment from any http(s) URL in one pass.
+  out = out.replace(/(https?:\/\/[^\s"'`\]\)?#]+?)([?#][^\s"'`\]\)]*)/g, "$1");
   return out;
+}
+
+function encodingVariants(value: string): string[] {
+  const variants = [value];
+  try {
+    const decoded = decodeURIComponent(value);
+    if (decoded.length > 0 && decoded !== value) {
+      variants.push(decoded);
+    }
+  } catch {
+    // Not percent-encoded; nothing to add.
+  }
+  try {
+    const encoded = encodeURIComponent(value);
+    if (encoded.length > 0 && encoded !== value) {
+      variants.push(encoded);
+    }
+  } catch {
+    // Nothing to add.
+  }
+  return variants;
 }
 
 function collectSecretValues(input: string): string[] {
   const secrets: string[] = [];
-  const push = (value: string): void => {
+  const addSecretVariant = (value: string): void => {
     if (value.length === 0) {
       return;
     }
-    secrets.push(value);
-    try {
-      const decoded = decodeURIComponent(value);
-      if (decoded.length > 0 && decoded !== value) {
-        secrets.push(decoded);
-      }
-    } catch {
-      // Not percent-encoded; nothing to add.
-    }
-    try {
-      const encoded = encodeURIComponent(value);
-      if (encoded.length > 0 && encoded !== value) {
-        secrets.push(encoded);
-      }
-    } catch {
-      // Nothing to add.
-    }
+    secrets.push(...encodingVariants(value));
   };
 
   try {
     const url = new URL(input);
     if (url.password.length > 0) {
-      push(url.password);
+      addSecretVariant(url.password);
     }
     url.searchParams.forEach((value) => {
-      push(value);
+      addSecretVariant(value);
     });
     if (url.search.length > 1) {
-      push(url.search);
-      push(url.search.slice(1));
+      addSecretVariant(url.search);
+      addSecretVariant(url.search.slice(1));
     }
     if (url.hash.length > 1) {
-      push(url.hash);
-      push(url.hash.slice(1));
+      addSecretVariant(url.hash);
+      addSecretVariant(url.hash.slice(1));
     }
   } catch {
     // Not a URL; nothing secret to extract.
@@ -125,23 +129,9 @@ function redactSourceSecretsFromDetail(detail: string, rawInput: string, display
     if (username.length > 0) {
       // Redact the username only in credentialed contexts (`USER:` / `USER@`)
       // so a common-word username never mangles unrelated prose like "git".
-      const variants = new Set([username]);
-      try {
-        const decoded = decodeURIComponent(username);
-        if (decoded.length > 0) {
-          variants.add(decoded);
-        }
-      } catch {
-        // Nothing to add.
-      }
-      try {
-        const encoded = encodeURIComponent(username);
-        if (encoded.length > 0) {
-          variants.add(encoded);
-        }
-      } catch {
-        // Nothing to add.
-      }
+      // A bare username echoed outside a URL is out of scope: git's own
+      // diagnostics either echo the full URL (replaced above) or omit it.
+      const variants = new Set(encodingVariants(username));
       for (const variant of variants) {
         if (variant.length === 0) {
           continue;
