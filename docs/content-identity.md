@@ -65,6 +65,18 @@ hash: for a skill whose Codex invocation policy was materialized, the expected d
 compares it with the expected hash; a mismatch fails the artifact with code `verification-failed`. Consumers must
 never present `expectedHash` as the hash of the upstream source tree.
 
+## Offline verification
+
+`verify --only <artifact-id>` rehashes each selected Base Store copy with the
+same walker and rules described above and compares the fresh digest against
+the recorded installed hash of the recorded algorithm -- never against the
+current source, which is never contacted. A skill entry still recorded as
+`agent-installer-tree-v1` cannot be verified this way: the pre-framing digest
+is collidable (ADR 0005), so it is refused with `unsupported-algorithm` until
+a reinstall at the recorded commit re-records it as `agent-installer-tree-v2`.
+The `files[]` inventory in a verify report comes from the same fresh walk as
+the reported `installedHash`, exactly like the install report.
+
 ## Overlay registry
 
 Installer transformations applied to an artifact before hashing and writing. Exactly one overlay exists today:

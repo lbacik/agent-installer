@@ -25,7 +25,8 @@ import {
   formatRemovedLine,
   formatSkippedExposureLine,
   formatSyncActionLine,
-  formatSyncLegacyNoticeLine
+  formatSyncLegacyNoticeLine,
+  formatVerifyLines
 } from "./format.js";
 import { promptForManagedArtifactRemovals, promptForSelections } from "./interactive.js";
 import {
@@ -37,12 +38,14 @@ import {
   buildScanJson,
   buildSyncErrorJson,
   buildSyncJson,
+  buildVerifyReportJson,
   managedEntryToJson,
   syncConflictToSkipped
 } from "./json-report.js";
 import { resolveTargetPaths } from "./paths.js";
 import type { InstallErrorCode, InstallOutcome } from "./types.js";
 import { loadState } from "./state.js";
+import { runVerify } from "./verify.js";
 import { withResolvedArtifactStates } from "./source-workflow.js";
 import { SyncConflictError, syncExposures } from "./sync.js";
 import type { ScanSourceOptions } from "./source.js";
@@ -569,6 +572,35 @@ function createProgram(): Command {
         }
       }
     );
+
+  program
+    .command("verify")
+    .description(
+      "Verify selected managed artifacts offline against their recorded content identity, without contacting any source."
+    )
+    .option("--only <artifact-id>", "Verify only this artifact id, for example skill:review (repeatable)", collectOnly, [])
+    .option("--json", "Emit a machine-readable JSON report on stdout instead of human-readable output")
+    .action(async (options: { only: string[]; json?: boolean }) => {
+      // Usage errors fail before any work starts, so a misuse changes nothing on disk.
+      if (options.only.length === 0) {
+        throw new Error("verify requires at least one --only <artifact-id> (repeatable); there is no --all mode.");
+      }
+
+      const outcome = await runVerify({ only: options.only });
+      if (options.json === true) {
+        printJson(buildVerifyReportJson(outcome));
+      } else {
+        if (outcome.error !== undefined) {
+          console.error(`error ${outcome.error.code}: ${outcome.error.message}`);
+        }
+
+        printLines(formatVerifyLines(outcome));
+      }
+
+      if (outcome.outcome !== "verified") {
+        process.exitCode = 1;
+      }
+    });
 
   const configCommand = program.command("config").description("Manage the ~/.agents/agent-installer/config.yaml exposure configuration.");
   configCommand
