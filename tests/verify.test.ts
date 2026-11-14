@@ -25,7 +25,8 @@ interface CliResult {
 async function runCli(args: string[], home: string, extraEnv: NodeJS.ProcessEnv = {}): Promise<CliResult> {
   try {
     const { stdout, stderr } = await execFileAsync(TSX_BIN, [CLI_ENTRY, ...args], {
-      env: { ...process.env, HOME: home, ...extraEnv }
+      // picocolors enables color when CI is set; keep human-output assertions ANSI-free.
+      env: { ...process.env, HOME: home, NO_COLOR: "1", ...extraEnv }
     });
     return { stdout, stderr, exitCode: 0 };
   } catch (error) {
