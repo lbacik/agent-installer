@@ -444,3 +444,56 @@ describe("sync: no source contact", () => {
     expect(await fs.readlink(path.join(claudeSkills, "review"))).toBe(path.join(paths.agentsSkillsDir, "review"));
   });
 });
+
+describe("sync: incremental state saves", () => {
+  it("persists exposures already created when sync fails partway", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-sync-home-");
+    const paths = resolveTargetPaths(home);
+    await installAllFromSource(repo, home);
+
+    const claudeSkills = path.join(home, "claude-skills");
+    const claudePrompts = path.join(home, "claude-prompts");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n    prompts: ${claudePrompts}\n`);
+
+    const before = await loadState(paths);
+    expect(before.entries.length).toBeGreaterThanOrEqual(2);
+    const firstId = before.entries[0]!.id;
+    const secondId = before.entries[1]!.id;
+
+    process.env.AGENT_INSTALLER_TEST_FAIL_SYNC = secondId;
+    try {
+      await expect(syncExposures({}, home)).rejects.toThrow(/Injected sync failure/);
+    } finally {
+      delete process.env.AGENT_INSTALLER_TEST_FAIL_SYNC;
+    }
+
+    // The first entry was processed and persisted before the failure; the
+    // second entry was never touched.
+    const after = await loadState(paths);
+    expect(after.entries.find((entry) => entry.id === firstId)?.exposures).not.toEqual([]);
+    expect(after.entries.find((entry) => entry.id === secondId)?.exposures).toEqual([]);
+  });
+});
+
+describe("sync/install: shared selector reporting rule", () => {
+  it("reports unmatched --only selectors exactly as given (order and duplicates kept)", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-sync-home-");
+    await installAllFromSource(repo, home);
+
+    const selectors = ["skill:missing", "skill:missing", "skill:other"];
+    await expect(syncExposures({ only: selectors }, home)).rejects.toThrow(UnmatchedSyncSelectorsError);
+    try {
+      await syncExposures({ only: selectors }, home);
+      expect.unreachable();
+    } catch (error) {
+      expect((error as UnmatchedSyncSelectorsError).selectors).toEqual(selectors);
+    }
+
+    const { runInstall } = await import("../src/install.js");
+    const outcome = await runInstall({ sourcePath: repo, home, only: selectors });
+    expect(outcome.outcome.error?.code).toBe("unmatched-selector");
+    expect(outcome.outcome.unmatchedSelectors).toEqual(selectors);
+  });
+});

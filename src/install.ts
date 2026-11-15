@@ -2,12 +2,14 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { AgentInstallerConfig, loadConfig } from "./config.js";
 import { InstallFailedError, SourceConfigurationError } from "./errors.js";
-import { observeExposures, pathExists, readSymlinkTarget } from "./exposures.js";
+import { applyExposurePlanEntries, ensureParentDir, removeManagedExposures, removePath } from "./exposure-mutations.js";
+import { observeExposures, pathExists } from "./exposures.js";
 import { formatConflictLine, formatExposureConflictLine } from "./format.js";
 import { hashArtifactContent } from "./hash.js";
 import { artifactId, getBasePath, getMarkerPath, resolveHome, resolveTargetPaths, TargetPaths } from "./paths.js";
+import { partitionSelectedById } from "./selection.js";
 import { materializeOverlay, resolveInvocationPolicyOverlay } from "./skill-invocation-policy.js";
-import { loadState, saveState } from "./state.js";
+import { loadState, saveSortedEntries } from "./state.js";
 import type { ScanSourceOptions } from "./source.js";
 import type { ResolveSourceOptions } from "./source-resolver.js";
 import {
@@ -17,7 +19,6 @@ import {
   DiscoveredArtifact,
   ExposureConflictSummary,
   ExposureInstallRecord,
-  ExposurePlanEntry,
   ExposureRecord,
   InstallArtifactOutcome,
   InstallDisposition,
@@ -88,31 +89,6 @@ export class UnmatchedSelectorsError extends Error {
   }
 }
 
-function partitionSelectors(states: ArtifactState[], only: string[]): { matched: ArtifactState[]; unmatched: string[] } {
-  const byId = new Map(states.map((state) => [state.id, state]));
-  // Unmatched selectors are reported exactly as given (order and duplicates
-  // preserved); only the matched side is deduped so each artifact installs once.
-  const unmatched = only.filter((id) => !byId.has(id));
-  const matched = [...new Set(only)].filter((id) => byId.has(id)).map((id) => byId.get(id) as ArtifactState);
-  return { matched, unmatched };
-}
-
-function selectStates(states: ArtifactState[], only: string[]): ArtifactState[] {
-  const { matched, unmatched } = partitionSelectors(states, only);
-  if (unmatched.length > 0) {
-    throw new UnmatchedSelectorsError(unmatched);
-  }
-
-  return matched;
-}
-
-async function ensureParentDir(targetPath: string): Promise<void> {
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
-}
-
-async function removePath(targetPath: string): Promise<void> {
-  await fs.rm(targetPath, { recursive: true, force: true });
-}
 
 /** Base-store-relative location: the skill name, or `<name>.md` for a prompt. */
 export function getStoreRelativePath(artifact: Pick<DiscoveredArtifact, "kind" | "name">): string {
@@ -121,101 +97,6 @@ export function getStoreRelativePath(artifact: Pick<DiscoveredArtifact, "kind" |
 
 export function overlayToRecord(overlay: OverlayFile): OverlayRecord {
   return { id: overlay.id, version: overlay.version, paths: [overlay.relativePath], effect: overlay.effect };
-}
-
-// Creates (or repairs) one owned exposure symlink and verifies it actually resolves to
-// basePath afterward. Shared by install's applyExposurePlan and sync's
-// applyEntrySyncActions so both create exposures the same way.
-export async function createOwnedSymlink(basePath: string, targetPath: string): Promise<boolean> {
-  return (await tryCreateOwnedSymlink(basePath, targetPath)).ok;
-}
-
-export async function tryCreateOwnedSymlink(
-  basePath: string,
-  targetPath: string
-): Promise<{ ok: true } | { ok: false; reason: string }> {
-  try {
-    await ensureParentDir(targetPath);
-    await removePath(targetPath);
-    await fs.symlink(basePath, targetPath);
-  } catch (error) {
-    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
-  }
-
-  if ((await readSymlinkTarget(targetPath)) === basePath) {
-    return { ok: true };
-  }
-
-  return { ok: false, reason: `Exposure path ${targetPath} did not verify as a symlink to the managed copy after creation.` };
-}
-
-export type RevalidatedRemoval = "removed" | "already-gone" | "foreign";
-
-// Immediately before deleting an exposure symlink, revalidates it is still an owned
-// symlink to basePath (ownership revalidation). A path already gone is treated as
-// nothing to report; a path a foreign file/dir/symlink has since replaced is left
-// alone. Shared by install's removeArtifacts and sync's applyEntrySyncActions so both
-// delete exposures under the same safety rule.
-export async function revalidateAndRemove(targetPath: string, basePath: string): Promise<RevalidatedRemoval> {
-  if (!(await pathExists(targetPath))) {
-    return "already-gone";
-  }
-
-  if ((await readSymlinkTarget(targetPath)) !== basePath) {
-    return "foreign";
-  }
-
-  await removePath(targetPath);
-  return "removed";
-}
-
-// Applies one artifact's exposure plan, best-effort per target: a "new" entry is
-// (re)created, a "match" entry is left alone, and a "conflict" entry is never touched.
-// A failed creation is skipped rather than retried or rolled back, so a later target's
-// success is never undone by an earlier target's failure. The returned exposures
-// reflect exactly what verified as correct on disk after every attempt, merged with
-// whatever the entry already owns outside the current plan (e.g. a legacy exposure, or
-// one for a target no longer declared in config.yaml).
-async function applyExposurePlanDetailed(
-  plan: ExposurePlanEntry[],
-  basePath: string,
-  existingExposures: ExposureRecord[]
-): Promise<{ exposures: ExposureRecord[]; results: ExposureInstallRecord[] }> {
-  const byPath = new Map(existingExposures.map((exposure) => [exposure.path, exposure]));
-  const results: ExposureInstallRecord[] = [];
-
-  for (const entry of plan) {
-    if (entry.status === "conflict") {
-      results.push({
-        targetName: entry.targetName,
-        path: entry.path,
-        result: "conflict",
-        reason: entry.reason ?? "conflict"
-      });
-      continue;
-    }
-
-    if (entry.status === "match") {
-      byPath.set(entry.path, { path: entry.path, targetName: entry.targetName });
-      results.push({ targetName: entry.targetName, path: entry.path, result: "present" });
-      continue;
-    }
-
-    const created = await tryCreateOwnedSymlink(basePath, entry.path);
-    if (created.ok) {
-      byPath.set(entry.path, { path: entry.path, targetName: entry.targetName });
-      results.push({ targetName: entry.targetName, path: entry.path, result: "created" });
-    } else {
-      results.push({
-        targetName: entry.targetName,
-        path: entry.path,
-        result: "failed",
-        reason: `Could not create exposure for target "${entry.targetName}" at ${entry.path}: ${created.reason}`
-      });
-    }
-  }
-
-  return { exposures: [...byPath.values()], results };
 }
 
 async function resolveOverlay(artifact: DiscoveredArtifact): Promise<OverlayFile | null> {
@@ -391,10 +272,6 @@ export async function collectArtifactStates(
   return { states, removed };
 }
 
-function saveEntries(paths: TargetPaths, entries: Map<string, ManagedEntry>): Promise<void> {
-  return saveState(paths, { version: 4, entries: [...entries.values()].sort((left, right) => left.id.localeCompare(right.id)) });
-}
-
 function sameExposureSet(left: ExposureRecord[], right: ExposureRecord[]): boolean {
   const key = (exposure: ExposureRecord): string => `${exposure.targetName ?? ""}\n${exposure.path}`;
   const leftKeys = new Set(left.map(key));
@@ -441,20 +318,20 @@ async function executeArtifactInstall(
     // Unchanged: verified, not written. Missing exposures are still repaired,
     // and the state entry advances to this run's provenance, content identity
     // and overlays whenever any of them (or the exposure set) actually changed.
-    const { exposures, results } = await applyExposurePlanDetailed(current.exposurePlan, current.basePath, existingExposures);
+    const { exposures, results } = await applyExposurePlanEntries(current.basePath, existingExposures, current.exposurePlan);
     const previous = entries.get(current.id);
     let entry: ManagedEntry;
     if (previous !== undefined) {
       const refreshed = refreshUnchangedEntry(previous, current, exposures);
       if (refreshed !== null) {
         entries.set(refreshed.id, refreshed);
-        await saveEntries(paths, entries);
+        await saveSortedEntries(paths, entries);
       }
       entry = entries.get(current.id)!;
     } else {
       entry = buildManagedEntry(current.artifact, paths, expected, current.installedContent!, overlay, exposures);
       entries.set(entry.id, entry);
-      await saveEntries(paths, entries);
+      await saveSortedEntries(paths, entries);
     }
 
     return { entry, disposition: "unchanged", exposureResults: results, installedContent: current.installedContent! };
@@ -472,7 +349,7 @@ async function executeArtifactInstall(
     // Record what is actually on disk, then stop the run like any other failure.
     const entry = buildManagedEntry(current.artifact, paths, expected, installedContent, overlay, existingExposures);
     entries.set(entry.id, entry);
-    await saveEntries(paths, entries);
+    await saveSortedEntries(paths, entries);
     throw new InstallFailedError(
       current.id,
       "verification-failed",
@@ -480,11 +357,11 @@ async function executeArtifactInstall(
     );
   }
 
-  const { exposures, results } = await applyExposurePlanDetailed(current.exposurePlan, current.basePath, existingExposures);
+  const { exposures, results } = await applyExposurePlanEntries(current.basePath, existingExposures, current.exposurePlan);
   const entry = buildManagedEntry(current.artifact, paths, expected, installedContent, overlay, exposures);
   await writeMarker(entry);
   entries.set(entry.id, entry);
-  await saveEntries(paths, entries);
+  await saveSortedEntries(paths, entries);
 
   return {
     entry,
@@ -498,7 +375,7 @@ async function executeArtifactInstall(
 // persisted before moving to the next artifact, so a mid-run crash never leaves more
 // than one artifact's state out of sync with what is actually on disk (multi-target
 // work within a single artifact is itself best-effort with no rollback; see
-// applyExposurePlanDetailed).
+// applyExposurePlanEntries in ./exposure-mutations.js).
 export async function installArtifacts(states: ArtifactState[], home?: string): Promise<ManagedEntry[]> {
   const paths = resolveTargetPaths(home);
   const state = await loadState(paths);
@@ -596,7 +473,7 @@ async function refreshUnchangedProvenance(selectedStates: ArtifactState[], home?
     }
 
     entries.set(refreshed.id, refreshed);
-    await saveEntries(paths, entries);
+    await saveSortedEntries(paths, entries);
   }
 }
 
@@ -605,13 +482,13 @@ export interface RemoveArtifactsResult {
   skippedExposures: SkippedExposureRemoval[];
 }
 
-// Immediately before deleting each recorded exposure, re-verifies it is still a symlink
-// pointing at the entry's basePath (ownership revalidation). A path a foreign
-// file/dir/symlink has since replaced is left alone and its record retained rather than
-// silently dropped; every other exposure, and the basePath and marker themselves
-// (never revalidated -- ~/.agents is this tool's sole managed territory), are still
-// removed. Each id is persisted right after it finishes, bounding a mid-run crash to at
-// most one in-flight artifact.
+// Removes managed artifacts by id. Ownership revalidation of each recorded exposure
+// happens inside removeManagedExposures (the single shared mutation step): a path a
+// foreign file/dir/symlink has since replaced is left alone and its record retained
+// rather than silently dropped, and reported in skippedExposures. Every other
+// exposure, and the basePath and marker themselves (never revalidated -- ~/.agents is
+// this tool's sole managed territory), are still removed. Each id is persisted right
+// after it finishes, bounding a mid-run crash to at most one in-flight artifact.
 export async function removeArtifacts(ids: string[], home?: string): Promise<RemoveArtifactsResult> {
   const paths = resolveTargetPaths(home);
   await loadConfig(paths, home);
@@ -626,25 +503,24 @@ export async function removeArtifacts(ids: string[], home?: string): Promise<Rem
       continue;
     }
 
-    const retainedExposures: ExposureRecord[] = [];
-    for (const exposure of entry.exposures) {
-      if ((await revalidateAndRemove(exposure.path, entry.basePath)) === "foreign") {
-        retainedExposures.push(exposure);
-        skippedExposures.push({ id, path: exposure.path, targetName: exposure.targetName });
+    const { retained, outcomes } = await removeManagedExposures(entry);
+    for (const outcome of outcomes) {
+      if (outcome.outcome === "kept-foreign") {
+        skippedExposures.push({ id, path: outcome.path, targetName: outcome.targetName });
       }
     }
 
     await removePath(entry.basePath);
     await removePath(getMarkerPath(entry.basePath, entry.kind));
 
-    if (retainedExposures.length > 0) {
-      entries.set(id, { ...entry, exposures: retainedExposures });
+    if (retained.length > 0) {
+      entries.set(id, { ...entry, exposures: retained });
     } else {
       entries.delete(id);
     }
 
     removed.push(entry);
-    await saveEntries(paths, entries);
+    await saveSortedEntries(paths, entries);
   }
 
   return { removed, skippedExposures };
@@ -855,7 +731,7 @@ export async function runInstall(request: InstallRequest): Promise<InstallAllRes
     let selectedStates: ArtifactState[];
     let unmatchedSelectors: string[] = [];
     if (request.only !== undefined) {
-      const partitioned = partitionSelectors(states, request.only);
+      const partitioned = partitionSelectedById(states, (state) => state.id, request.only);
       unmatchedSelectors = partitioned.unmatched;
       selectedStates = partitioned.matched;
       if (unmatchedSelectors.length > 0) {

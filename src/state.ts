@@ -208,6 +208,17 @@ export async function loadStateReadOnly(paths: TargetPaths): Promise<InstallerSt
   return migrateToV4(JSON.parse(raw));
 }
 
+// The single sorted version-4 state save: entries are always persisted ordered by
+// id so every writer (install, sync, uninstall, prune) produces the same canonical
+// file. Accepts either an array or a map of entries.
+export async function saveSortedEntries(
+  paths: TargetPaths,
+  entries: Iterable<ManagedEntry> | Map<string, ManagedEntry>
+): Promise<void> {
+  const list = entries instanceof Map ? [...entries.values()] : [...entries];
+  return saveState(paths, { version: 4, entries: list.sort((left, right) => left.id.localeCompare(right.id)) });
+}
+
 // Writes to a sibling temp path and renames it into place, so a crash mid-write can
 // never leave state.json partially written; a retry always sees either the pre- or
 // fully-written file.

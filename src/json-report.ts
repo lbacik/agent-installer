@@ -295,6 +295,7 @@ export function syncConflictToSkipped(action: SyncAction): JsonSyncSkipped {
 
 export function buildSyncJson(result: SyncResult): SyncJsonOutput {
   const planned: JsonSyncAction[] = [];
+  const applied: JsonSyncAction[] = [];
   const skipped: JsonSyncSkipped[] = [];
 
   for (const action of result.actions) {
@@ -316,13 +317,66 @@ export function buildSyncJson(result: SyncResult): SyncJsonOutput {
     }
   }
 
-  for (const removal of result.skippedOrphanRemovals) {
-    skipped.push({
-      id: removal.id,
-      targetName: removal.targetName ?? "legacy",
-      path: removal.path,
-      conflictReason: "Exposure path is no longer an owned symlink, so it was left alone."
-    });
+  // `applied` reflects what actually happened (per-action outcomes), never the
+  // plan: only created/moved/removed outcomes land here. Failed and kept-foreign
+  // outcomes land exactly once in `skipped`, never in `applied`. Dry runs apply
+  // nothing, so `applied` stays empty while `planned` still shows the intent.
+  const outcomes = result.outcomes ?? [];
+  for (const outcome of outcomes) {
+    if (outcome.outcome === "created") {
+      applied.push({
+        id: outcome.id,
+        targetName: outcome.targetName ?? "legacy",
+        kind: outcome.kind,
+        path: outcome.path,
+        action: "create"
+      });
+    } else if (outcome.outcome === "moved" && outcome.fromPath !== undefined) {
+      applied.push({
+        id: outcome.id,
+        targetName: outcome.targetName ?? "legacy",
+        kind: outcome.kind,
+        path: outcome.path,
+        action: "move",
+        fromPath: outcome.fromPath
+      });
+    } else if (outcome.outcome === "removed") {
+      applied.push({
+        id: outcome.id,
+        targetName: outcome.targetName ?? "legacy",
+        kind: outcome.kind,
+        path: outcome.path,
+        action: "remove"
+      });
+    } else if (outcome.outcome === "failed") {
+      skipped.push({
+        id: outcome.id,
+        targetName: outcome.targetName ?? "legacy",
+        path: outcome.path,
+        conflictReason: outcome.reason ?? "Exposure creation failed."
+      });
+    } else if (outcome.outcome === "kept-foreign") {
+      skipped.push({
+        id: outcome.id,
+        targetName: outcome.targetName ?? "legacy",
+        path: outcome.fromPath ?? outcome.path,
+        conflictReason: outcome.reason ?? "Exposure path is no longer an owned symlink, so it was left alone."
+      });
+    }
+  }
+
+  // Back-compat: callers that predate per-action outcomes only carry
+  // skippedOrphanRemovals. Outcomes already encode the same skips, so only fall
+  // back when no outcomes were recorded at all.
+  if (outcomes.length === 0) {
+    for (const removal of result.skippedOrphanRemovals) {
+      skipped.push({
+        id: removal.id,
+        targetName: removal.targetName ?? "legacy",
+        path: removal.path,
+        conflictReason: "Exposure path is no longer an owned symlink, so it was left alone."
+      });
+    }
   }
 
   const notices = result.legacyNotices.map(
@@ -333,7 +387,7 @@ export function buildSyncJson(result: SyncResult): SyncJsonOutput {
     {
       schemaVersion: JSON_SCHEMA_VERSION,
       planned,
-      applied: result.dryRun ? [] : planned,
+      applied: result.dryRun ? [] : applied,
       skipped
     },
     notices
