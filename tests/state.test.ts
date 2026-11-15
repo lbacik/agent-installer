@@ -64,21 +64,22 @@ describe("state", () => {
 
     const state = await loadState(paths);
     expect(state.version).toBe(4);
-    expect(state.entries[0]).toMatchObject({
+    expect(state.entries.map((entry) => entry.id)).toEqual(["prompt:commit-message", "skill:review"]);
+    expect(state.entries.find((entry) => entry.id === "skill:review")).toMatchObject({
       sourceRoot: "git+https://github.com/org/repo.git",
       requestedRef: "release/v1",
       exposures: [{ path: "/home/user/.claude/skills/review", targetName: null }],
       hashAlgorithm: "agent-installer-tree-v1",
       overlays: null
     });
-    expect(state.entries[0]?.resolvedCommit).toBeUndefined();
-    expect(state.entries[1]).toMatchObject({
+    expect(state.entries.find((entry) => entry.id === "skill:review")?.resolvedCommit).toBeUndefined();
+    expect(state.entries.find((entry) => entry.id === "prompt:commit-message")).toMatchObject({
       sourceRoot: "/local/repo",
       exposures: [{ path: "/home/user/.claude/commands/commit-message.md", targetName: null }],
       hashAlgorithm: "sha256",
       overlays: []
     });
-    expect(state.entries[1]?.requestedRef).toBeUndefined();
+    expect(state.entries.find((entry) => entry.id === "prompt:commit-message")?.requestedRef).toBeUndefined();
 
     const persisted = JSON.parse(await fs.readFile(paths.stateFile, "utf8"));
     expect(persisted.version).toBe(4);
@@ -170,22 +171,35 @@ describe("state", () => {
 
     const state = await loadState(paths);
     expect(state.version).toBe(4);
-    expect(state.entries[0]).toMatchObject({
+    // Migration healing persists through the single sorted save, so entries read
+    // back ordered by id regardless of the legacy file's order.
+    expect(state.entries.map((entry) => entry.id)).toEqual(["prompt:commit-message", "skill:review"]);
+    expect(state.entries.find((entry) => entry.id === "skill:review")).toMatchObject({
       requestedRef: "main",
       resolvedCommit: "a".repeat(40),
       exposures: [],
       hashAlgorithm: "agent-installer-tree-v1",
       overlays: null
     });
-    expect(state.entries[1]).toMatchObject({
+    expect(state.entries.find((entry) => entry.id === "prompt:commit-message")).toMatchObject({
       hashAlgorithm: "sha256",
       overlays: []
     });
 
     const persisted = JSON.parse(await fs.readFile(paths.stateFile, "utf8"));
     expect(persisted.version).toBe(4);
-    expect(persisted.entries[0]).toMatchObject({ hashAlgorithm: "agent-installer-tree-v1", overlays: null });
-    expect(persisted.entries[1]).toMatchObject({ hashAlgorithm: "sha256", overlays: [] });
+    expect(persisted.entries.map((entry: { id: string }) => entry.id)).toEqual([
+      "prompt:commit-message",
+      "skill:review"
+    ]);
+    expect(persisted.entries.find((entry: { id: string }) => entry.id === "skill:review")).toMatchObject({
+      hashAlgorithm: "agent-installer-tree-v1",
+      overlays: null
+    });
+    expect(persisted.entries.find((entry: { id: string }) => entry.id === "prompt:commit-message")).toMatchObject({
+      hashAlgorithm: "sha256",
+      overlays: []
+    });
   });
 
   it("round-trips a saved version 4 state through loadState unchanged", async () => {

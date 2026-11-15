@@ -179,8 +179,8 @@ export async function loadState(paths: TargetPaths): Promise<InstallerState> {
   // must use loadStateReadOnly instead so verification never touches disk.
   if (version !== 4) {
     const migrated = migrateToV4(parsed);
-    await saveState(paths, migrated);
-    return migrated;
+    const entries = await saveSortedEntries(paths, migrated.entries);
+    return { version: 4, entries };
   }
 
   return stateSchemaV4.parse(parsed);
@@ -209,14 +209,17 @@ export async function loadStateReadOnly(paths: TargetPaths): Promise<InstallerSt
 }
 
 // The single sorted version-4 state save: entries are always persisted ordered by
-// id so every writer (install, sync, uninstall, prune) produces the same canonical
-// file. Accepts either an array or a map of entries.
+// id so every writer (install, sync, uninstall, prune, migration healing) produces
+// the same canonical file. Accepts either an array or a map of entries, and returns
+// the sorted list so callers can keep their in-memory view in agreement with disk.
 export async function saveSortedEntries(
   paths: TargetPaths,
   entries: Iterable<ManagedEntry> | Map<string, ManagedEntry>
-): Promise<void> {
+): Promise<ManagedEntry[]> {
   const list = entries instanceof Map ? [...entries.values()] : [...entries];
-  return saveState(paths, { version: 4, entries: list.sort((left, right) => left.id.localeCompare(right.id)) });
+  list.sort((left, right) => left.id.localeCompare(right.id));
+  await saveState(paths, { version: 4, entries: list });
+  return list;
 }
 
 // Writes to a sibling temp path and renames it into place, so a crash mid-write can

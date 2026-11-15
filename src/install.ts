@@ -7,7 +7,7 @@ import { observeExposures, pathExists } from "./exposures.js";
 import { formatConflictLine, formatExposureConflictLine } from "./format.js";
 import { hashArtifactContent } from "./hash.js";
 import { artifactId, getBasePath, getMarkerPath, resolveHome, resolveTargetPaths, TargetPaths } from "./paths.js";
-import { partitionSelectedById } from "./selection.js";
+import { conflictsShouldBlock, partitionSelectedById } from "./selection.js";
 import { materializeOverlay, resolveInvocationPolicyOverlay } from "./skill-invocation-policy.js";
 import { loadState, saveSortedEntries } from "./state.js";
 import type { ScanSourceOptions } from "./source.js";
@@ -754,7 +754,7 @@ export async function runInstall(request: InstallRequest): Promise<InstallAllRes
     // Strict-mode refusal: nothing is installed; base conflicts record as
     // conflict with no exposures (never evaluated), exposure conflicts record
     // as conflict with their pairs structured in exposures[].
-    if ((conflicts.length > 0 || exposureConflicts.length > 0) && request.allowConflicts !== true) {
+    if (conflictsShouldBlock(conflicts.length + exposureConflicts.length, request.allowConflicts)) {
       const exposureConflictIds = new Set(exposureConflicts.map((conflict) => conflict.id));
       const outcome: InstallOutcome = {
         ...buildErrorOutcome(paths, "conflict", conflictMessage(conflicts, exposureConflicts), {

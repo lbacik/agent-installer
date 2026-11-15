@@ -474,6 +474,42 @@ describe("sync: incremental state saves", () => {
     expect(after.entries.find((entry) => entry.id === firstId)?.exposures).not.toEqual([]);
     expect(after.entries.find((entry) => entry.id === secondId)?.exposures).toEqual([]);
   });
+
+  it("persists a moved exposure when sync fails on a later entry", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-sync-home-");
+    const paths = resolveTargetPaths(home);
+    await installAllFromSource(repo, home);
+
+    const claudeSkills = path.join(home, "claude-skills");
+    const oldPrompts = path.join(home, "claude-prompts-old");
+    const newPrompts = path.join(home, "claude-prompts-new");
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n    prompts: ${oldPrompts}\n`);
+    await syncExposures({}, home);
+
+    const oldPromptExposure = path.join(oldPrompts, "commit-message.md");
+    const newPromptExposure = path.join(newPrompts, "commit-message.md");
+    const skillExposure = path.join(claudeSkills, "review");
+    expect(await fs.readlink(oldPromptExposure)).toBe(path.join(paths.agentsPromptsDir, "commit-message.md"));
+
+    await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n    prompts: ${newPrompts}\n`);
+
+    process.env.AGENT_INSTALLER_TEST_FAIL_SYNC = "skill:review";
+    try {
+      await expect(syncExposures({}, home)).rejects.toThrow(/Injected sync failure/);
+    } finally {
+      delete process.env.AGENT_INSTALLER_TEST_FAIL_SYNC;
+    }
+
+    const after = await loadState(paths);
+    expect(after.entries.find((entry) => entry.id === "prompt:commit-message")?.exposures).toEqual([
+      { path: newPromptExposure, targetName: "claude" }
+    ]);
+    expect(after.entries.find((entry) => entry.id === "skill:review")?.exposures).toEqual([
+      { path: skillExposure, targetName: "claude" }
+    ]);
+    expect(await fs.readlink(newPromptExposure)).toBe(path.join(paths.agentsPromptsDir, "commit-message.md"));
+  });
 });
 
 describe("sync/install: shared selector reporting rule", () => {
