@@ -76,7 +76,7 @@ describe("scan/list parity with legacy drift", () => {
           : await loadConfig(paths, home);
 
         const artifacts = await scanSourceRepository(repo);
-        const { states } = await collectArtifactStates(artifacts, home);
+        const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
         const scanState = states.find((state) => state.id === "skill:review");
         expect(scanState).toBeDefined();
 
