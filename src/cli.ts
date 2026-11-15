@@ -46,7 +46,7 @@ import { resolveTargetPaths } from "./paths.js";
 import type { InstallErrorCode, InstallOutcome } from "./types.js";
 import { loadState } from "./state.js";
 import { runVerify } from "./verify.js";
-import { withResolvedArtifactStates } from "./source-workflow.js";
+import { withScannedSource } from "./source-workflow.js";
 import { SyncConflictError, syncExposures } from "./sync.js";
 import type { ScanSourceOptions } from "./source.js";
 import type { ArtifactState } from "./types.js";
@@ -191,7 +191,10 @@ function readPackageVersion(): string {
 }
 
 async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOptions, listLength?: number, ref?: string): Promise<void> {
-  await withResolvedArtifactStates(inputPath, undefined, scanOptions, ref === undefined ? undefined : { ref }, async ({ states, removed }) => {
+  await withScannedSource(
+    inputPath,
+    { scanOptions, resolveOptions: ref === undefined ? undefined : { ref } },
+    async ({ states, removed }) => {
     printLines(collectLegacyNotices([...states, ...removed.map((entry) => entry.managedEntry)]));
     const selection = await promptForSelections(states, removed, {
       clearPromptOnDone: true,
@@ -284,11 +287,12 @@ function createProgram(): Command {
       // Usage errors fail before any work starts, outside the JSON error wrapping below.
       parseJsonSchemaOption(options.jsonSchema, json, "scan");
       try {
-        await withResolvedArtifactStates(
+        await withScannedSource(
           inputPath,
-          undefined,
-          scanOptionsFromCommand(options),
-          options.ref === undefined ? undefined : { ref: options.ref },
+          {
+            scanOptions: scanOptionsFromCommand(options),
+            resolveOptions: options.ref === undefined ? undefined : { ref: options.ref }
+          },
           async ({ states, removed }) => {
             if (json) {
               printJson(buildScanJson(states, removed));

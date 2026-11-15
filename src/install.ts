@@ -9,7 +9,7 @@ import { artifactId, getBasePath, getMarkerPath, resolveHome, resolveTargetPaths
 import { materializeOverlay, resolveInvocationPolicyOverlay } from "./skill-invocation-policy.js";
 import { loadState, saveState } from "./state.js";
 import type { ScanSourceOptions } from "./source.js";
-import { resolveSourceInput, type ResolveSourceOptions } from "./source-resolver.js";
+import type { ResolveSourceOptions } from "./source-resolver.js";
 import {
   ArtifactKind,
   ArtifactState,
@@ -245,14 +245,6 @@ async function corruptInstalledCopy(kind: ArtifactKind, basePath: string): Promi
   await fs.appendFile(target, "\n# injected corruption for verification-failure testing\n", "utf8");
 }
 
-async function resolveSourceIdentity(sourceRoot: string): Promise<string> {
-  try {
-    return await fs.realpath(sourceRoot);
-  } catch {
-    return sourceRoot;
-  }
-}
-
 async function writeMarker(entry: ManagedEntry): Promise<void> {
   const markerPath = getMarkerPath(entry.basePath, entry.kind);
   await fs.writeFile(markerPath, `${JSON.stringify({ id: entry.id, installedAt: entry.installedAt }, null, 2)}\n`, "utf8");
@@ -289,8 +281,8 @@ function buildManagedEntry(
 
 export async function collectArtifactStates(
   sourceArtifacts: DiscoveredArtifact[],
-  home?: string,
-  sourceRoot?: string
+  home: string | undefined,
+  sourceIdentity: string
 ): Promise<{
   states: ArtifactState[];
   removed: RemovedArtifactState[];
@@ -384,9 +376,8 @@ export async function collectArtifactStates(
     states.push(nextState);
   }
 
-  const scopedSourceRoot = sourceRoot === undefined ? sourceArtifacts[0]?.sourceRoot : await resolveSourceIdentity(sourceRoot);
   const removed = state.entries
-    .filter((entry) => scopedSourceRoot !== undefined && entry.sourceRoot === scopedSourceRoot)
+    .filter((entry) => entry.sourceRoot === sourceIdentity)
     .filter((entry) => !sourceIds.has(entry.id))
     .map((entry) => ({
       id: entry.id,
@@ -843,19 +834,13 @@ function buildErrorOutcome(
  * scan errors still throw for the caller to classify.
  */
 export async function runInstall(request: InstallRequest): Promise<InstallAllResult> {
-  const paths = resolveTargetPaths(request.home);
-  const config = await loadConfig(paths, request.home);
-  const { scanSourceRepository } = await import("./source.js");
-  const source = await resolveSourceInput(request.sourcePath, request.resolveOptions);
-
-  try {
-    const artifacts = (await scanSourceRepository(source.scanRoot, request.scanOptions)).map((artifact) => ({
-      ...artifact,
-      sourceRoot: source.sourceIdentity,
-      requestedRef: source.requestedRef,
-      resolvedCommit: source.resolvedCommit
-    }));
-    const { states, removed } = await collectArtifactStates(artifacts, request.home, source.sourceIdentity);
+  const { withScannedSource } = await import("./source-workflow.js");
+  return withScannedSource(
+    request.sourcePath,
+    { home: request.home, scanOptions: request.scanOptions, resolveOptions: request.resolveOptions },
+    async ({ states, removed, resolvedCommit }) => {
+      const paths = resolveTargetPaths(request.home);
+      const config = await loadConfig(paths, request.home);
 
     const empty: Omit<InstallAllResult, "states" | "outcome"> = {
       installed: [],
@@ -1005,7 +990,7 @@ export async function runInstall(request: InstallRequest): Promise<InstallAllRes
     // no Git provenance and are left byte-for-byte unchanged. Bumped
     // installed-different artifacts with matching content already advanced
     // through executeArtifactInstall above.
-    if (source.resolvedCommit !== undefined) {
+    if (resolvedCommit !== undefined) {
       await refreshUnchangedProvenance(selectedStates, request.home);
     }
 
@@ -1074,9 +1059,8 @@ export async function runInstall(request: InstallRequest): Promise<InstallAllRes
     };
 
     return { states, installed, conflicts, exposureConflicts, pruned, prunedSkippedExposures, outcome };
-  } finally {
-    await source.cleanup();
-  }
+    }
+  );
 }
 
 export async function installAllFromSource(

@@ -284,14 +284,14 @@ describe("sync: link-only update reconciliation", () => {
     await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${newSkills}\n`);
 
     const artifacts = await scanSourceRepository(repo);
-    const { states } = await collectArtifactStates(artifacts, home);
+    const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
     const reviewState = states.find((state) => state.id === "skill:review");
     expect(reviewState?.status).toBe("installed-different");
     expect(reviewState?.sourceHash).toBe(reviewState?.installedHash);
 
     await syncExposures({}, home);
 
-    const resynced = await collectArtifactStates(await scanSourceRepository(repo), home);
+    const resynced = await collectArtifactStates(await scanSourceRepository(repo), home, await fs.realpath(repo));
     expect(resynced.states.find((state) => state.id === "skill:review")?.status).toBe("installed-same");
   });
 });
