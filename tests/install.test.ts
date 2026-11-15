@@ -3,10 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { SourceConfigurationError } from "../src/errors.js";
 import { collectLegacyNotices } from "../src/format.js";
 import { hashArtifact } from "../src/hash.js";
 import { collectArtifactStates, installAllFromSource, installArtifacts, removeArtifacts } from "../src/install.js";
-import { resolveTargetPaths } from "../src/paths.js";
+import { getMarkerPath, resolveTargetPaths } from "../src/paths.js";
 import { scanSourceRepository } from "../src/source.js";
 import { loadState, saveState } from "../src/state.js";
 import type { GitRunner } from "../src/source-resolver.js";
@@ -422,6 +423,56 @@ describe("install --only selection", () => {
 
     expect(installed.map((entry) => entry.id)).toEqual(["skill:review"]);
     expect(conflicts.map((state) => state.id)).toEqual(["prompt:commit-message"]);
+  });
+});
+
+describe("install --only source-wide validation", () => {
+  it("aborts on a symlink in an unselected skill, installing nothing", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    await writeSkill(repo, "good", "# Good\n");
+    const badPath = await writeSkill(repo, "bad", "# Bad\n");
+    await fs.writeFile(path.join(badPath, "target.txt"), "content\n", "utf8");
+    await fs.symlink(path.join(badPath, "target.txt"), path.join(badPath, "shortcut.txt"));
+
+    // --only selects the clean skill, but source validation covers the whole
+    // scanned source, so the defect in the unselected skill aborts the run.
+    const error = await installAllFromSource(repo, home, undefined, undefined, { only: ["skill:good"] }).then(
+      () => {
+        throw new Error("expected install --only to reject on the unselected skill's symlink");
+      },
+      (failure: unknown) => failure
+    );
+    expect(error).toBeInstanceOf(SourceConfigurationError);
+    expect((error as Error).message).toMatch(/shortcut\.txt/);
+
+    // The abort happens before any managed path is touched: neither the
+    // selected nor the defective skill leaves a base-store copy or state entry.
+    const paths = resolveTargetPaths(home);
+    await expect(fs.access(paths.agentsSkillsDir)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await loadState(paths)).entries).toEqual([]);
+  });
+
+  it("aborts on unmergeable authored metadata in an unselected skill, installing nothing", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    await writeSkill(repo, "good", "# Good\n");
+    const badPath = await writeSkill(repo, "bad", skillWithFrontmatter("disable-model-invocation: true"));
+    await writeCodexMetadata(badPath, "just-a-string\n");
+
+    const error = await installAllFromSource(repo, home, undefined, undefined, { only: ["skill:good"] }).then(
+      () => {
+        throw new Error("expected install --only to reject on the unselected skill's authored metadata");
+      },
+      (failure: unknown) => failure
+    );
+    expect(error).toBeInstanceOf(SourceConfigurationError);
+    expect((error as Error).message).toMatch(/agents[\\/]openai\.yaml/);
+    expect((error as Error).message).toMatch(/disable-model-invocation/);
+
+    const paths = resolveTargetPaths(home);
+    await expect(fs.access(paths.agentsSkillsDir)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await loadState(paths)).entries).toEqual([]);
   });
 });
 
@@ -1331,5 +1382,76 @@ describe("content hashing", () => {
     } finally {
       process.umask(originalUmask);
     }
+  });
+});
+
+describe("credentialed remote source sanitization", () => {
+  it("persists only the sanitized identity after installing from a credential-bearing URL", async () => {
+    const home = await makeTempDir("agent-installer-home-");
+    const rawUrl = "https://USER:SECRET@github.com/org/repo.git?token=QSECRET";
+    const resolvedCommit = "e".repeat(40);
+    const git: GitRunner = async (args) => {
+      if (args[0] === "clone") {
+        const checkout = args[4] ?? "";
+        await fs.mkdir(path.join(checkout, "skills", "review"), { recursive: true });
+        await fs.writeFile(path.join(checkout, "skills", "review", "SKILL.md"), "# Review\n", "utf8");
+        return "";
+      }
+      if (args[0] === "rev-parse") {
+        return `${resolvedCommit}\n`;
+      }
+      return "";
+    };
+
+    const { states } = await installAllFromSource(rawUrl, home, undefined, { git });
+
+    expect(states.map((state) => state.id)).toEqual(["skill:review"]);
+    const paths = resolveTargetPaths(home);
+    const rawState = await fs.readFile(paths.stateFile, "utf8");
+    expect(rawState).not.toContain("USER:");
+    expect(rawState).not.toContain("SECRET");
+    expect(rawState).not.toContain("QSECRET");
+    expect(rawState).toContain("git+https://github.com/org/repo.git");
+
+    const state = await loadState(paths);
+    for (const entry of state.entries) {
+      expect(entry.sourceRoot).toBe("git+https://github.com/org/repo.git");
+    }
+
+    const { buildListJson } = await import("../src/json-report.js");
+    const listJson = JSON.stringify(await buildListJson(state.entries));
+    expect(listJson).not.toContain("USER:");
+    expect(listJson).not.toContain("SECRET");
+    expect(listJson).not.toContain("QSECRET");
+
+    for (const entry of state.entries) {
+      const marker = await fs.readFile(getMarkerPath(entry.basePath, entry.kind), "utf8");
+      expect(marker).not.toContain("USER:");
+      expect(marker).not.toContain("SECRET");
+      expect(marker).not.toContain("QSECRET");
+    }
+  });
+
+  it("reports redacted git failures as JSON errors without credentials", async () => {
+    const rawUrl = "https://USER:SECRET@github.com/org/repo.git?token=QSECRET";
+    const git: GitRunner = async (args) => {
+      const scanRoot = args[4] ?? "/tmp/repo";
+      throw new Error(`Command failed: git ${args.join(" ")}\nCloning into '${scanRoot}'...\nfatal: Authentication failed for '${rawUrl}'`);
+    };
+
+    const { buildArtifactsErrorJson, buildInstallErrorJson } = await import("../src/json-report.js");
+    const { resolveSourceInput } = await import("../src/source-resolver.js");
+    const error = await resolveSourceInput(rawUrl, { git }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+
+    const scanJson = JSON.stringify(buildArtifactsErrorJson(error));
+    expect(scanJson).not.toContain("USER:");
+    expect(scanJson).not.toContain("SECRET");
+    expect(scanJson).not.toContain("QSECRET");
+
+    const installJson = JSON.stringify(buildInstallErrorJson(error));
+    expect(installJson).not.toContain("USER:");
+    expect(installJson).not.toContain("SECRET");
+    expect(installJson).not.toContain("QSECRET");
   });
 });

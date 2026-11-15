@@ -18,13 +18,13 @@ afterEach(async () => {
 });
 
 describe("state", () => {
-  it("starts a fresh version 3 state file when none exists", async () => {
+  it("starts a fresh version 4 state file when none exists", async () => {
     const home = await makeTempDir("agent-installer-home-");
     const state = await loadState(resolveTargetPaths(home));
-    expect(state).toEqual({ version: 3, entries: [] });
+    expect(state).toEqual({ version: 4, entries: [] });
   });
 
-  it("migrates a version 1 state file straight through to version 3", async () => {
+  it("migrates a version 1 state file straight through to version 4", async () => {
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
     await fs.mkdir(paths.stateDir, { recursive: true });
@@ -63,25 +63,29 @@ describe("state", () => {
     );
 
     const state = await loadState(paths);
-    expect(state.version).toBe(3);
+    expect(state.version).toBe(4);
     expect(state.entries[0]).toMatchObject({
       sourceRoot: "git+https://github.com/org/repo.git",
       requestedRef: "release/v1",
-      exposures: [{ path: "/home/user/.claude/skills/review", targetName: null }]
+      exposures: [{ path: "/home/user/.claude/skills/review", targetName: null }],
+      hashAlgorithm: "agent-installer-tree-v1",
+      overlays: null
     });
     expect(state.entries[0]?.resolvedCommit).toBeUndefined();
     expect(state.entries[1]).toMatchObject({
       sourceRoot: "/local/repo",
-      exposures: [{ path: "/home/user/.claude/commands/commit-message.md", targetName: null }]
+      exposures: [{ path: "/home/user/.claude/commands/commit-message.md", targetName: null }],
+      hashAlgorithm: "sha256",
+      overlays: []
     });
     expect(state.entries[1]?.requestedRef).toBeUndefined();
 
     const persisted = JSON.parse(await fs.readFile(paths.stateFile, "utf8"));
-    expect(persisted.version).toBe(3);
+    expect(persisted.version).toBe(4);
     expect(persisted.entries[0].exposurePath).toBeUndefined();
   });
 
-  it("migrates a version 2 state file to version 3, wrapping exposurePath into a legacy exposure record", async () => {
+  it("migrates a version 2 state file to version 4, wrapping exposurePath into a legacy exposure record", async () => {
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
     await fs.mkdir(paths.stateDir, { recursive: true });
@@ -110,19 +114,21 @@ describe("state", () => {
     );
 
     const state = await loadState(paths);
-    expect(state.version).toBe(3);
+    expect(state.version).toBe(4);
     expect(state.entries[0]).toMatchObject({
       requestedRef: "main",
       resolvedCommit: "a".repeat(40),
-      exposures: [{ path: "/home/user/.claude/skills/review", targetName: null }]
+      exposures: [{ path: "/home/user/.claude/skills/review", targetName: null }],
+      hashAlgorithm: "agent-installer-tree-v1",
+      overlays: null
     });
     expect((state.entries[0] as unknown as { exposurePath?: unknown }).exposurePath).toBeUndefined();
 
     const persisted = JSON.parse(await fs.readFile(paths.stateFile, "utf8"));
-    expect(persisted.version).toBe(3);
+    expect(persisted.version).toBe(4);
   });
 
-  it("loads a version 3 state file as-is", async () => {
+  it("migrates a version 3 state file to version 4, labelling hash algorithms and unknown skill overlays", async () => {
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
     await fs.mkdir(paths.stateDir, { recursive: true });
@@ -144,6 +150,18 @@ describe("state", () => {
             installedAt: "2026-07-08T00:00:00.000Z",
             requestedRef: "main",
             resolvedCommit: "a".repeat(40)
+          },
+          {
+            id: "prompt:commit-message",
+            kind: "prompt",
+            name: "commit-message",
+            sourceRoot: "/local/repo",
+            relativeSourcePath: "prompts/commit-message.md",
+            basePath: "/home/user/.agents/prompts/commit-message.md",
+            exposures: [],
+            sourceHash: "source-hash",
+            installedHash: "installed-hash",
+            installedAt: "2026-07-08T00:00:00.000Z"
           }
         ]
       }),
@@ -151,14 +169,30 @@ describe("state", () => {
     );
 
     const state = await loadState(paths);
-    expect(state.entries[0]).toMatchObject({ requestedRef: "main", resolvedCommit: "a".repeat(40), exposures: [] });
+    expect(state.version).toBe(4);
+    expect(state.entries[0]).toMatchObject({
+      requestedRef: "main",
+      resolvedCommit: "a".repeat(40),
+      exposures: [],
+      hashAlgorithm: "agent-installer-tree-v1",
+      overlays: null
+    });
+    expect(state.entries[1]).toMatchObject({
+      hashAlgorithm: "sha256",
+      overlays: []
+    });
+
+    const persisted = JSON.parse(await fs.readFile(paths.stateFile, "utf8"));
+    expect(persisted.version).toBe(4);
+    expect(persisted.entries[0]).toMatchObject({ hashAlgorithm: "agent-installer-tree-v1", overlays: null });
+    expect(persisted.entries[1]).toMatchObject({ hashAlgorithm: "sha256", overlays: [] });
   });
 
-  it("round-trips a saved state through loadState unchanged", async () => {
+  it("round-trips a saved version 4 state through loadState unchanged", async () => {
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
     const written: import("../src/state.js").InstallerState = {
-      version: 3,
+      version: 4,
       entries: [
         {
           id: "skill:review",
@@ -170,6 +204,8 @@ describe("state", () => {
           exposures: [{ path: "/home/user/.claude/skills/review", targetName: "claude" }],
           sourceHash: "source-hash",
           installedHash: "installed-hash",
+          hashAlgorithm: "agent-installer-tree-v2",
+          overlays: [],
           installedAt: "2026-07-08T00:00:00.000Z"
         }
       ]
@@ -185,13 +221,13 @@ describe("state", () => {
     await fs.mkdir(paths.stateDir, { recursive: true });
     await fs.writeFile(paths.stateFile, JSON.stringify({ version: 99, entries: [] }), "utf8");
 
-    await expect(loadState(paths)).rejects.toThrow(/version/i);
+    await expect(loadState(paths)).rejects.toThrow(/1, 2, 3, or 4/);
   });
 
   it("never leaves state.json partially written, and a retry resumes cleanly", async () => {
     const home = await makeTempDir("agent-installer-home-");
     const paths = resolveTargetPaths(home);
-    const goodState: import("../src/state.js").InstallerState = { version: 3, entries: [] };
+    const goodState: import("../src/state.js").InstallerState = { version: 4, entries: [] };
     await saveState(paths, goodState);
 
     // Simulate a crash between writing the temp file and renaming it into place: the
@@ -203,7 +239,7 @@ describe("state", () => {
     expect(await fs.readFile(paths.stateFile, "utf8")).toBe(`${JSON.stringify(goodState, null, 2)}\n`);
 
     const nextState: import("../src/state.js").InstallerState = {
-      version: 3,
+      version: 4,
       entries: [
         {
           id: "skill:review",
@@ -215,6 +251,8 @@ describe("state", () => {
           exposures: [],
           sourceHash: "source-hash",
           installedHash: "installed-hash",
+          hashAlgorithm: "agent-installer-tree-v2",
+          overlays: [],
           installedAt: "2026-07-08T00:00:00.000Z"
         }
       ]

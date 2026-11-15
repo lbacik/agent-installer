@@ -12,6 +12,10 @@ const CODEX_METADATA_RELATIVE_PATH = "agents/openai.yaml";
 const CODEX_POLICY_KEY = "policy";
 const CODEX_IMPLICIT_INVOCATION_KEY = "allow_implicit_invocation";
 
+/** Stable Overlay identity for the Claude-to-Codex invocation policy translation (see the Overlay registry in docs/content-identity.md). */
+export const CODEX_INVOCATION_POLICY_OVERLAY_ID = "codex-invocation-policy";
+export const CODEX_INVOCATION_POLICY_OVERLAY_VERSION = 1;
+
 function extractFrontmatter(content: string): string | null {
   const normalized = content.startsWith("\uFEFF") ? content.slice(1) : content;
   const match = /^---\r?\n([\s\S]*?)\r?\n---(\r?\n|$)/.exec(normalized);
@@ -116,7 +120,12 @@ export async function resolveInvocationPolicyOverlay(skillSourcePath: string): P
   return {
     relativePath: CODEX_METADATA_RELATIVE_PATH,
     // lineWidth 0 disables folding, so authored long scalars survive the round trip.
-    content: document.toString({ lineWidth: 0 })
+    content: document.toString({ lineWidth: 0 }),
+    id: CODEX_INVOCATION_POLICY_OVERLAY_ID,
+    version: CODEX_INVOCATION_POLICY_OVERLAY_VERSION,
+    // Whether the source shipped no Codex metadata (the file is generated) or
+    // an authored one that was merged (the file is modified).
+    effect: authored === null ? "added" : "modified"
   };
 }
 

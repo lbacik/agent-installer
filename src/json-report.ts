@@ -1,4 +1,4 @@
-import { buildExposurePlan, planEntryToExposureState, readSymlinkTarget } from "./install.js";
+import { observeExposures, observeRecordedExposures } from "./exposures.js";
 import { buildLegacyExposureNotice } from "./format.js";
 import { resolveHome } from "./paths.js";
 import type { AgentInstallerConfig } from "./config.js";
@@ -9,11 +9,19 @@ import type {
   ExposureKind,
   ExposureRecord,
   ExposureState,
+  InstallOutcome,
   ManagedEntry,
-  RemovedArtifactState
+  RemovedArtifactState,
+  VerifyOutcome
 } from "./types.js";
 
 export const JSON_SCHEMA_VERSION = 2 as const;
+
+/** Schema version selected with `install --json-schema 3`. */
+export const INSTALL_REPORT_SCHEMA_VERSION = 3 as const;
+
+/** `kind` discriminator carried by every v3 install report. */
+export const INSTALL_REPORT_KIND = "agent-installer.install-report" as const;
 
 export interface JsonArtifactRecord {
   id: string;
@@ -148,7 +156,8 @@ export function removedArtifactStateToJson(state: RemovedArtifactState): JsonArt
 // against the installer's own recorded hashes, not against the source repository's
 // current content. With a config, a desired-but-missing exposure also counts as
 // drift (mirroring scan); without one, only the owned recorded links are checked.
-// Legacy exposures never affect the aggregate status; they only surface notices.
+// Legacy exposures never affect the aggregate status anywhere; they only surface
+// notices and per-exposure drift.
 export async function managedEntryToJson(
   entry: ManagedEntry,
   config?: AgentInstallerConfig | null,
@@ -157,65 +166,42 @@ export async function managedEntryToJson(
   const contentMatches = entry.sourceHash === entry.installedHash;
 
   if (config === undefined || config === null) {
-    const checks = await Promise.all(
-      entry.exposures.map(async (exposure) => ({
-        exposure,
-        owned: (await readSymlinkTarget(exposure.path)) === entry.basePath
-      }))
-    );
-    const exposureMatches = checks.every((check) => check.owned);
+    const { exposures, namedDrift } = await observeRecordedExposures(entry.exposures, entry.basePath, contentMatches);
 
     return {
       id: entry.id,
       kind: entry.kind,
       name: entry.name,
-      status: contentMatches && exposureMatches ? "installed-same" : "installed-different",
+      status: contentMatches && !namedDrift ? "installed-same" : "installed-different",
       sourceIdentity: entry.sourceRoot,
       relativeSourcePath: entry.relativeSourcePath,
       basePath: entry.basePath,
-      exposures: checks.map(({ exposure, owned }) => ({
-        targetName: exposure.targetName,
-        path: exposure.path,
-        status: owned
-          ? contentMatches
-            ? ("installed-same" as ArtifactStatus)
-            : ("installed-different" as ArtifactStatus)
-          : ("installed-different" as ArtifactStatus)
-      })),
+      exposures,
       sourceHash: entry.sourceHash,
       installedHash: entry.installedHash,
       ...provenanceFields(entry)
     };
   }
 
-  const desiredPlan = await buildExposurePlan(config, resolveHome(home), { kind: entry.kind, name: entry.name }, entry.basePath);
-  const exposures: ExposureState[] = desiredPlan.map((plan) => planEntryToExposureState(plan, contentMatches));
-
-  const plannedPaths = new Set(desiredPlan.map((plan) => plan.path));
-  for (const record of entry.exposures) {
-    if (record.targetName !== null || plannedPaths.has(record.path)) {
-      continue;
-    }
-
-    const owned = (await readSymlinkTarget(record.path)) === entry.basePath;
-    exposures.push({
-      targetName: null,
-      path: record.path,
-      status: owned
-        ? ((contentMatches ? "installed-same" : "installed-different") as ArtifactStatus)
-        : ("installed-different" as ArtifactStatus)
-    });
-  }
+  const observation = await observeExposures({
+    artifact: { kind: entry.kind, name: entry.name },
+    basePath: entry.basePath,
+    records: entry.exposures,
+    config,
+    home: resolveHome(home),
+    contentMatches,
+    baseIsNew: false
+  });
 
   return {
     id: entry.id,
     kind: entry.kind,
     name: entry.name,
-    status: contentMatches && desiredPlan.every((plan) => plan.status === "match") ? "installed-same" : "installed-different",
+    status: contentMatches && !observation.desiredDrift ? "installed-same" : "installed-different",
     sourceIdentity: entry.sourceRoot,
     relativeSourcePath: entry.relativeSourcePath,
     basePath: entry.basePath,
-    exposures,
+    exposures: observation.exposures,
     sourceHash: entry.sourceHash,
     installedHash: entry.installedHash,
     ...provenanceFields(entry)
@@ -366,4 +352,70 @@ export function buildSyncErrorJson(error: unknown, skipped: JsonSyncSkipped[] = 
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Schema version carried by every verify report. */
+export const VERIFY_REPORT_SCHEMA_VERSION = 3 as const;
+
+/** `kind` discriminator carried by every verify report. */
+export const VERIFY_REPORT_KIND = "agent-installer.verify-report" as const;
+
+export interface VerifyReportJson {
+  schemaVersion: typeof VERIFY_REPORT_SCHEMA_VERSION;
+  kind: typeof VERIFY_REPORT_KIND;
+  baseStore: VerifyOutcome["baseStore"];
+  outcome: VerifyOutcome["outcome"];
+  artifacts: VerifyOutcome["artifacts"];
+  notice: string;
+  error?: { code: string; message: string };
+}
+
+/**
+ * Renders the verify report from the Verify Outcome value alone: no
+ * filesystem reads, and no fields threaded through one at a time. Run-level
+ * and per-artifact shapes pass through untouched so the report and the value
+ * can never disagree.
+ */
+export function buildVerifyReportJson(outcome: VerifyOutcome): VerifyReportJson {
+  return {
+    schemaVersion: VERIFY_REPORT_SCHEMA_VERSION,
+    kind: VERIFY_REPORT_KIND,
+    baseStore: outcome.baseStore,
+    outcome: outcome.outcome,
+    artifacts: outcome.artifacts,
+    notice: outcome.notice,
+    ...(outcome.error === undefined ? {} : { error: outcome.error })
+  };
+}
+
+export interface InstallReportJson {
+  schemaVersion: typeof INSTALL_REPORT_SCHEMA_VERSION;
+  kind: typeof INSTALL_REPORT_KIND;
+  baseStore: { skills: string; prompts: string };
+  outcome: InstallOutcome["outcome"];
+  exposureOutcome: InstallOutcome["exposureOutcome"];
+  artifacts: InstallOutcome["artifacts"];
+  unmatchedSelectors: string[];
+  pruned: InstallOutcome["pruned"];
+  error?: { code: string; message: string };
+}
+
+/**
+ * Renders the v3 install report from the Install Outcome value alone: no
+ * filesystem reads, and no fields threaded through one at a time. Run-level
+ * and per-artifact shapes pass through untouched so the report and the value
+ * can never disagree.
+ */
+export function buildInstallReportJson(outcome: InstallOutcome): InstallReportJson {
+  return {
+    schemaVersion: INSTALL_REPORT_SCHEMA_VERSION,
+    kind: INSTALL_REPORT_KIND,
+    baseStore: outcome.baseStore,
+    outcome: outcome.outcome,
+    exposureOutcome: outcome.exposureOutcome,
+    artifacts: outcome.artifacts,
+    unmatchedSelectors: outcome.unmatchedSelectors,
+    pruned: outcome.pruned,
+    ...(outcome.error === undefined ? {} : { error: outcome.error })
+  };
 }

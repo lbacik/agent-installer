@@ -208,6 +208,30 @@ describe("install --json", () => {
   });
 });
 
+describe("install --json --json-schema 3 source-wide validation", () => {
+  it("reports error code source-configuration when an unselected skill is defective", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    const badDir = path.join(repo, "skills", "bad");
+    await fs.mkdir(badDir, { recursive: true });
+    await fs.writeFile(path.join(badDir, "SKILL.md"), "# Bad\n", "utf8");
+    await fs.writeFile(path.join(badDir, "target.txt"), "content\n", "utf8");
+    await fs.symlink(path.join(badDir, "target.txt"), path.join(badDir, "shortcut.txt"));
+
+    const result = await runCli(["install", repo, "--only", "skill:review", "--json", "--json-schema", "3"], home);
+
+    expect(result.exitCode).not.toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as {
+      outcome?: string;
+      error?: { code?: string; message?: string };
+    };
+    expect(parsed.outcome).toBe("aborted");
+    expect(parsed.error?.code).toBe("source-configuration");
+    expect(parsed.error?.message).toMatch(/shortcut\.txt/);
+    await expect(fs.access(path.join(home, ".agents", "skills"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
 describe("list --json", () => {
   it("produces output non-interactively with no managed artifacts", async () => {
     const home = await makeTempDir("agent-installer-cli-home-");
@@ -552,6 +576,32 @@ describe("--ref on subcommands", () => {
     expect(install.stderr).toMatch(/--ref cannot precede the install subcommand; place --ref after the subcommand name/);
     await expect(fs.access(path.join(home, ".agents", "skills", "review"))).rejects.toThrow();
   });
+});
+
+describe("credentialed remote source diagnostics", () => {
+  const RAW_URL = "https://USER:SECRET@127.0.0.1:1/org/repo.git?token=QSECRET";
+
+  it("scan keeps credentials out of stderr and --json errors", async () => {
+    const home = await makeTempDir("agent-installer-cli-home-");
+
+    const human = await runCli(["scan", RAW_URL], home);
+    expect(human.exitCode).not.toBe(0);
+    for (const secret of ["USER:", "SECRET", "QSECRET"]) {
+      expect(human.stderr).not.toContain(secret);
+      expect(human.stdout).not.toContain(secret);
+    }
+    expect(human.stderr).toContain("git+https://127.0.0.1:1/org/repo.git");
+
+    const json = await runCli(["scan", RAW_URL, "--json"], home);
+    expect(json.exitCode).not.toBe(0);
+    const parsed = parseStdoutJson(json.stdout) as { error?: string };
+    expect(parsed.error).toBeDefined();
+    for (const secret of ["USER:", "SECRET", "QSECRET"]) {
+      expect(parsed.error ?? "").not.toContain(secret);
+      expect(json.stderr).not.toContain(secret);
+    }
+    expect(parsed.error ?? "").toContain("git+https://127.0.0.1:1/org/repo.git");
+  }, 60000);
 });
 
 describe("root options before a subcommand", () => {

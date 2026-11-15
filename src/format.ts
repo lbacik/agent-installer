@@ -9,7 +9,8 @@ import {
   RemovedArtifactState,
   SkippedExposureRemoval,
   SyncAction,
-  SyncLegacyNotice
+  SyncLegacyNotice,
+  VerifyOutcome
 } from "./types.js";
 
 function colorizeStatus(status: ArtifactState["status"] | RemovedArtifactState["status"]): string {
@@ -166,4 +167,21 @@ export function formatSyncActionLine(action: SyncAction): string {
 
 export function formatSyncLegacyNoticeLine(notice: SyncLegacyNotice): string {
   return `notice ${notice.id} has a legacy exposure at ${notice.path} (never touched by sync)`;
+}
+
+// One human-readable line per requested artifact: the verdict plus, for
+// refusals, the closed refusal codes in check order.
+export function formatVerifyRecordLine(record: VerifyOutcome["artifacts"][number]): string {
+  if (record.result === "verified") {
+    return `${pc.green("verified")} ${record.id}`;
+  }
+
+  const codes = record.refusals.map((refusal) => refusal.code).join(", ");
+  return `${pc.red("refused")} ${record.id} (${codes})`;
+}
+
+// Human-readable verify output: one line per requested artifact, then the
+// fixed notice that only recorded provenance was verified.
+export function formatVerifyLines(outcome: VerifyOutcome): string[] {
+  return [...outcome.artifacts.map(formatVerifyRecordLine), outcome.notice];
 }

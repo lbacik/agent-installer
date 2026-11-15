@@ -98,6 +98,18 @@ export interface ManagedEntry {
   exposures: ExposureRecord[];
   sourceHash: string;
   installedHash: string;
+  /** The content-identity algorithm that produced `sourceHash`/`installedHash`
+   * (`agent-installer-tree-v1` or `agent-installer-tree-v2` for skills,
+   * `sha256` for prompts). Both hashes of one entry always share it, so they
+   * stay comparable with each other but never with another algorithm's. */
+  hashAlgorithm: string;
+  /**
+   * The installer Overlays recorded when this entry was last written, exactly
+   * as reported in the v3 install record, or `[]` when none applied. `null`
+   * means unknown: a skill entry migrated from state v3, healed the next time
+   * an install writes it. Prompts always record `[]`.
+   */
+  overlays: OverlayRecord[] | null;
   installedAt: string;
   /** The `--ref` value requested at install time, when the source was a remote Git repository. */
   requestedRef?: string | undefined;
@@ -111,6 +123,12 @@ export interface ArtifactState {
   basePath: string;
   sourceHash: string;
   installedHash: string | null;
+  /** The installer Overlay resolved for this artifact in this run, if any. */
+  overlay: OverlayFile | null;
+  /** Expected content identity: source files plus any Overlay. `digest` always equals `sourceHash`. */
+  sourceContent: ContentIdentity;
+  /** Freshly verified content identity of the base-store copy, when one exists (managed or not). */
+  installedContent: ContentIdentity | null;
   status: ArtifactStatus;
   managedEntry: ManagedEntry | null;
   /**
@@ -177,11 +195,223 @@ export interface SyncLegacyNotice {
 }
 
 /**
+ * What one install run did to a single Requested Artifact's Base Store copy
+ * only (never its Tool Exposures): `installed` (it was `new`), `updated`
+ * (content rewritten), `unchanged` (verified, not written), `conflict` (a
+ * basePath conflict, skipped or refused), `failed`, or `not-attempted` (the
+ * run stopped before reaching it).
+ */
+export type InstallDisposition = "installed" | "updated" | "unchanged" | "conflict" | "failed" | "not-attempted";
+
+/**
+ * What one install run did to a single configured (target, kind) exposure:
+ * `created` (linked this run), `repaired` (reserved for exposure-only repair
+ * flows), `present` (already correct), `conflict` (unmanaged path, skipped),
+ * or `failed` (creation failed, skipped).
+ */
+export type ExposureInstallResult = "created" | "repaired" | "present" | "conflict" | "failed";
+
+/** One configured exposure's install result, with `reason` for `conflict`/`failed`. */
+export interface ExposureInstallRecord {
+  targetName: string;
+  path: string;
+  result: ExposureInstallResult;
+  reason?: string;
+}
+
+/** The closed error-code vocabulary for v3 install reports (`error.code`) and per-artifact `failure.code`. */
+export type InstallErrorCode =
+  | "source-unavailable"
+  | "source-configuration"
+  | "config-invalid"
+  | "conflict"
+  | "unmatched-selector"
+  | "install-failed"
+  | "verification-failed";
+
+/** The run-level Install Outcome, computed from Base Store dispositions only. */
+export type InstallRunOutcome = "complete" | "partial" | "aborted";
+
+/** The run-level exposure summary, independent of the Base Store outcome. */
+export type InstallExposureSummary = "not-configured" | "complete" | "partial";
+
+/** Exactly one verified outcome per Requested Artifact, the unit of the v3 install report. */
+export interface InstallArtifactOutcome {
+  id: string;
+  kind: ArtifactKind;
+  name: string;
+  sourceIdentity: string;
+  relativeSourcePath: string;
+  status: ArtifactStatus;
+  disposition: InstallDisposition;
+  exposures: ExposureInstallRecord[];
+  basePath: string;
+  /** Base-store-relative location: the skill name, or `<name>.md` for a prompt. */
+  storeRelativePath: string;
+  /** Always present; `null` when not applicable (for example a local source). */
+  requestedRef: string | null;
+  /** Always present; `null` when not applicable (for example a local source). */
+  resolvedCommit: string | null;
+  /**
+   * Freshly verified Content Identity; present whenever the Base Store copy
+   * exists after the run. `expectedHash` is the source files plus any
+   * Overlays (never a pristine upstream-tree hash); `installedHash` is freshly
+   * computed in this run from the Base Store copy.
+   */
+  content?: { algorithm: string; expectedHash: string; installedHash: string };
+  /** Complete inventory of the Base Store copy's regular content files, from the same fresh walk as `installedHash`. */
+  files?: ContentFileRecord[];
+  /** Every installer Overlay applied, or empty. */
+  overlays: OverlayRecord[];
+  /** Only when `disposition` is `failed`. */
+  failure?: { code: InstallErrorCode; message: string };
+}
+
+/** One artifact removed by `--prune`: no content identity, exposures split by what actually happened. */
+export interface InstallPrunedOutcome {
+  id: string;
+  basePath: string;
+  storeRelativePath: string;
+  requestedRef: string | null;
+  resolvedCommit: string | null;
+  removedExposures: ExposureRecord[];
+  retainedExposures: ExposureRecord[];
+}
+
+/**
+ * The versioned, complete, machine-readable outcome of one install run: one
+ * record per Requested Artifact plus run-level summaries. Rendered to JSON
+ * from this value alone, with no further filesystem reads.
+ */
+export interface InstallOutcome {
+  schemaVersion: 3;
+  kind: "agent-installer.install-report";
+  baseStore: { skills: string; prompts: string };
+  outcome: InstallRunOutcome;
+  exposureOutcome: InstallExposureSummary;
+  artifacts: InstallArtifactOutcome[];
+  unmatchedSelectors: string[];
+  pruned: InstallPrunedOutcome[];
+  error?: { code: InstallErrorCode; message: string };
+}
+
+/** The closed refusal-code vocabulary for offline verification (`verify` per-artifact `refusals[].code`). */
+export type VerifyRefusalCode =
+  | "not-managed"
+  | "missing"
+  | "not-owned"
+  | "invalid-content"
+  | "unsupported-algorithm"
+  | "provenance-missing"
+  | "inconsistent-record"
+  | "modified";
+
+/** One structured reason a requested artifact refused verification. */
+export interface VerifyRefusal {
+  code: VerifyRefusalCode;
+  message: string;
+}
+
+/** Exactly one verification record per distinct requested artifact id. */
+export interface VerifyArtifactRecord {
+  id: string;
+  kind: ArtifactKind;
+  name: string;
+  sourceIdentity: string;
+  relativeSourcePath: string;
+  basePath: string;
+  /** Base-store-relative location: the skill name, or `<name>.md` for a prompt. */
+  storeRelativePath: string;
+  /** Always present; `null` when not recorded (for example a local source). */
+  requestedRef: string | null;
+  /** Always present; `null` when not recorded (for example a local source). */
+  resolvedCommit: string | null;
+  installedAt: string;
+  /** Every Overlay recorded on the entry, or empty when none applied. */
+  overlays: OverlayRecord[];
+  verification: "recorded-installation";
+  result: "verified" | "refused";
+  refusals: VerifyRefusal[];
+  /**
+   * Recorded content identity plus the freshly computed digest. `expectedHash`
+   * is the recorded `sourceHash` under the recorded `algorithm`;
+   * `installedHash` is freshly computed from the Base Store copy now. Present
+   * whenever the fresh walk succeeds (even on refused records), absent
+   * otherwise.
+   */
+  content?: { algorithm: string; expectedHash: string; installedHash: string };
+  /** Complete inventory of the Base Store copy, from the same fresh walk as `installedHash`. */
+  files?: ContentFileRecord[];
+}
+
+/** The run-level verdict for offline verification. */
+export type VerifyRunOutcome = "verified" | "refused" | "error";
+
+/**
+ * The versioned, complete, machine-readable outcome of one offline
+ * verification run: exactly one record per distinct requested artifact id,
+ * plus run-level summaries. Rendered to JSON from this value alone, with no
+ * further filesystem reads.
+ */
+export interface VerifyOutcome {
+  schemaVersion: 3;
+  kind: "agent-installer.verify-report";
+  baseStore: { skills: string; prompts: string };
+  outcome: VerifyRunOutcome;
+  artifacts: VerifyArtifactRecord[];
+  notice: string;
+  error?: { code: "state-unreadable"; message: string };
+}
+
+/**
  * A file the installer materializes into the base-store copy of an artifact,
  * either adding one the source repository does not have or replacing one it
  * does. `relativePath` is POSIX-style and relative to the artifact root.
+ * `id`/`version` identify the installer Overlay in the Overlay registry (see
+ * docs/content-identity.md); `effect` records whether the source already
+ * shipped the file (`"modified"`, merged) or not (`"added"`, generated).
  */
 export interface OverlayFile {
   relativePath: string;
   content: string;
+  id: string;
+  version: number;
+  effect: "added" | "modified";
+}
+
+/** How an applied Overlay related to the source tree: the file was generated
+ * (`"added"`) or an authored file was merged (`"modified"`). */
+export type OverlayEffect = "added" | "modified";
+
+/**
+ * The reportable/persisted form of an applied installer Overlay: stable
+ * `id`/`version` from the Overlay registry, every affected `paths` entry
+ * (POSIX-style, relative to the artifact root), and the per-run `effect`.
+ */
+export interface OverlayRecord {
+  id: string;
+  version: number;
+  paths: string[];
+  effect: OverlayEffect;
+}
+
+/** One regular content file in a content inventory: POSIX-style path relative
+ * to the artifact root (`/`-separated), SHA-256 over the raw file bytes, and
+ * whether the executable bit is set. Sorted by UTF-8 byte order of `path`. */
+export interface ContentFileRecord {
+  path: string;
+  sha256: string;
+  executable: boolean;
+}
+
+/**
+ * Freshly verified content identity for one artifact copy: the hash
+ * `algorithm` that produced `digest` (for example `agent-installer-tree-v2`
+ * for skills or `sha256` for prompts), the digest itself, and the complete
+ * per-file inventory it was computed from.
+ */
+export interface ContentIdentity {
+  algorithm: string;
+  digest: string;
+  files: ContentFileRecord[];
 }
