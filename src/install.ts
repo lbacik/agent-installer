@@ -1,10 +1,11 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { AgentInstallerConfig, expandHome, loadConfig } from "./config.js";
+import { AgentInstallerConfig, loadConfig } from "./config.js";
 import { InstallFailedError, SourceConfigurationError } from "./errors.js";
+import { observeExposures, pathExists, readSymlinkTarget } from "./exposures.js";
 import { formatConflictLine, formatExposureConflictLine } from "./format.js";
 import { hashArtifactContent } from "./hash.js";
-import { artifactId, getBasePath, getMarkerPath, resolveExposurePath, resolveHome, resolveTargetPaths, TargetPaths } from "./paths.js";
+import { artifactId, getBasePath, getMarkerPath, resolveHome, resolveTargetPaths, TargetPaths } from "./paths.js";
 import { materializeOverlay, resolveInvocationPolicyOverlay } from "./skill-invocation-policy.js";
 import { loadState, saveState } from "./state.js";
 import type { ScanSourceOptions } from "./source.js";
@@ -12,15 +13,12 @@ import { resolveSourceInput, type ResolveSourceOptions } from "./source-resolver
 import {
   ArtifactKind,
   ArtifactState,
-  ArtifactStatus,
   ContentIdentity,
   DiscoveredArtifact,
   ExposureConflictSummary,
   ExposureInstallRecord,
-  ExposureKind,
   ExposurePlanEntry,
   ExposureRecord,
-  ExposureState,
   InstallArtifactOutcome,
   InstallDisposition,
   InstallErrorCode,
@@ -36,6 +34,10 @@ import {
 } from "./types.js";
 
 export type { ExposureConflictSummary } from "./types.js";
+// Re-exported so existing importers (`json-report.js`, `sync.js`, tests) keep
+// working: the implementations live in `./exposures.js`, the single module
+// that owns Tool Exposure observation.
+export { buildExposurePlan, exposureKindOf, planEntryToExposureState, readSymlinkTarget } from "./exposures.js";
 
 export function collectExposureConflicts(states: ArtifactState[]): ExposureConflictSummary[] {
   return states.flatMap((state) =>
@@ -104,25 +106,12 @@ function selectStates(states: ArtifactState[], only: string[]): ArtifactState[] 
   return matched;
 }
 
-async function pathExists(targetPath: string): Promise<boolean> {
-  try {
-    await fs.lstat(targetPath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function ensureParentDir(targetPath: string): Promise<void> {
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
 }
 
 async function removePath(targetPath: string): Promise<void> {
   await fs.rm(targetPath, { recursive: true, force: true });
-}
-
-export function exposureKindOf(kind: ArtifactKind): ExposureKind {
-  return kind === "skill" ? "skills" : "prompts";
 }
 
 /** Base-store-relative location: the skill name, or `<name>.md` for a prompt. */
@@ -132,52 +121,6 @@ export function getStoreRelativePath(artifact: Pick<DiscoveredArtifact, "kind" |
 
 export function overlayToRecord(overlay: OverlayFile): OverlayRecord {
   return { id: overlay.id, version: overlay.version, paths: [overlay.relativePath], effect: overlay.effect };
-}
-
-// Computes, for one artifact, the desired exposure at every currently configured target
-// that declares its kind. Never touches disk beyond reading whether a path exists and,
-// if so, what it links to -- callers decide whether/how to act on the plan.
-export async function buildExposurePlan(
-  config: AgentInstallerConfig | null,
-  home: string,
-  artifact: Pick<DiscoveredArtifact, "kind" | "name">,
-  basePath: string
-): Promise<ExposurePlanEntry[]> {
-  if (config === null) {
-    return [];
-  }
-
-  const kind = exposureKindOf(artifact.kind);
-  const plan: ExposurePlanEntry[] = [];
-
-  for (const [targetName, target] of Object.entries(config.targets)) {
-    const rawDir = target[kind];
-    if (rawDir === undefined) {
-      continue;
-    }
-
-    const exposurePath = resolveExposurePath(expandHome(rawDir, home), artifact);
-
-    if (!(await pathExists(exposurePath))) {
-      plan.push({ targetName, kind, path: exposurePath, status: "new" });
-      continue;
-    }
-
-    const symlinkTarget = await readSymlinkTarget(exposurePath);
-    if (symlinkTarget === basePath) {
-      plan.push({ targetName, kind, path: exposurePath, status: "match" });
-    } else {
-      plan.push({
-        targetName,
-        kind,
-        path: exposurePath,
-        status: "conflict",
-        reason: `Exposure path for target "${targetName}" already exists but is not managed by this installer.`
-      });
-    }
-  }
-
-  return plan;
 }
 
 // Creates (or repairs) one owned exposure symlink and verifies it actually resolves to
@@ -302,14 +245,6 @@ async function corruptInstalledCopy(kind: ArtifactKind, basePath: string): Promi
   await fs.appendFile(target, "\n# injected corruption for verification-failure testing\n", "utf8");
 }
 
-export async function readSymlinkTarget(targetPath: string): Promise<string | null> {
-  try {
-    return await fs.readlink(targetPath);
-  } catch {
-    return null;
-  }
-}
-
 async function resolveSourceIdentity(sourceRoot: string): Promise<string> {
   try {
     return await fs.realpath(sourceRoot);
@@ -350,94 +285,6 @@ function buildManagedEntry(
     requestedRef: artifact.requestedRef,
     resolvedCommit: artifact.resolvedCommit
   };
-}
-
-// Maps one desired exposure plan entry to its reportable ExposureState. A "match"
-// entry mirrors the content check (a correct link still serves stale content after
-// a source change); anything desired-but-not-"match" reports as its own drift
-// ("new") or blockage ("conflict"). Shared by scan's `collectArtifactStates` and
-// list's JSON reporting so both read the plan the same way.
-export function planEntryToExposureState(entry: ExposurePlanEntry, contentMatches: boolean): ExposureState {
-  if (entry.status === "conflict") {
-    return {
-      targetName: entry.targetName,
-      path: entry.path,
-      status: "conflict",
-      conflictReason: entry.reason ?? "conflict",
-      conflictPath: entry.path
-    };
-  }
-
-  if (entry.status === "new") {
-    return { targetName: entry.targetName, path: entry.path, status: "new" };
-  }
-
-  const status: ArtifactStatus = contentMatches ? "installed-same" : "installed-different";
-  return { targetName: entry.targetName, path: entry.path, status };
-}
-
-// Scan-side wrapper: when the base copy does not exist yet the whole artifact is
-// "new", so every desired exposure reports as "new" too, except conflicts,
-// which still report as conflicts so install can name them.
-function exposureStateForPlanEntry(
-  entry: ExposurePlanEntry,
-  contentMatches: boolean,
-  baseIsNew: boolean
-): ExposureState {
-  if (baseIsNew && entry.status !== "conflict") {
-    return { targetName: entry.targetName, path: entry.path, status: "new" };
-  }
-
-  return planEntryToExposureState(entry, contentMatches);
-}
-
-// Reports the legacy (`targetName: null`) exposures the installer still owns for
-// one artifact. Legacy links are never repaired or re-targeted here; a correct
-// link mirrors the content check, while a missing or foreign link reports as
-// drift (never as a conflict). Recorded exposures for named targets are sync's
-// domain and are intentionally left out: scan reports what is desired plus what
-// is legacy, not orphans awaiting `sync` cleanup.
-async function legacyExposureStates(
-  managedEntry: ManagedEntry | null,
-  plannedPaths: Set<string>,
-  basePath: string,
-  contentMatches: boolean,
-  baseIsNew: boolean
-): Promise<ExposureState[]> {
-  const states: ExposureState[] = [];
-  for (const record of managedEntry?.exposures ?? []) {
-    if (record.targetName !== null || plannedPaths.has(record.path)) {
-      continue;
-    }
-
-    let status: ArtifactStatus;
-    if (baseIsNew) {
-      status = "new";
-    } else {
-      const linkTarget = await readSymlinkTarget(record.path);
-      status = linkTarget === basePath ? (contentMatches ? "installed-same" : "installed-different") : "installed-different";
-    }
-
-    states.push({ targetName: null, path: record.path, status });
-  }
-
-  return states;
-}
-
-// Builds the reportable `exposures[]` for one artifact: one entry per desired
-// (target, kind) pair from the current `config.yaml`, plus one per owned legacy
-// exposure. Never called for a basePath conflict.
-async function buildExposureStates(
-  exposurePlan: ExposurePlanEntry[],
-  managedEntry: ManagedEntry | null,
-  basePath: string,
-  contentMatches: boolean,
-  baseIsNew: boolean
-): Promise<ExposureState[]> {
-  const states = exposurePlan.map((entry) => exposureStateForPlanEntry(entry, contentMatches, baseIsNew));
-  const plannedPaths = new Set(exposurePlan.map((entry) => entry.path));
-  states.push(...(await legacyExposureStates(managedEntry, plannedPaths, basePath, contentMatches, baseIsNew)));
-  return states;
 }
 
 export async function collectArtifactStates(
@@ -486,16 +333,30 @@ export async function collectArtifactStates(
     // evaluated; otherwise a desired-but-missing or conflicting exposure counts as
     // drift, bumping an otherwise-unchanged artifact to "installed-different" so
     // install picks it back up. A single-exposure conflict never sets the aggregate
-    // to "conflict"; only the basePath conflict above does that.
-    const exposurePlan = status === "conflict" ? [] : await buildExposurePlan(config, resolvedHome, artifact, basePath);
+    // to "conflict"; only the basePath conflict above does that. Legacy drift never
+    // affects the aggregate anywhere (scan, install, or list): install never
+    // repairs legacy exposures, so counting them would pin the artifact at
+    // "installed-different" forever.
     const contentMatches = status === "installed-same";
     const baseIsNew = !baseExists;
-    if (status === "installed-same" && exposurePlan.some((entry) => entry.status !== "match")) {
+    const observation =
+      status === "conflict"
+        ? { plan: [], exposures: [], desiredDrift: false }
+        : await observeExposures({
+            artifact,
+            basePath,
+            records: managedEntry?.exposures ?? [],
+            config,
+            home: resolvedHome,
+            contentMatches,
+            baseIsNew
+          });
+    const exposurePlan = observation.plan;
+    if (status === "installed-same" && observation.desiredDrift) {
       status = "installed-different";
     }
 
-    const exposures =
-      status === "conflict" ? [] : await buildExposureStates(exposurePlan, managedEntry, basePath, contentMatches, baseIsNew);
+    const exposures = observation.exposures;
 
     const nextState: ArtifactState = {
       artifact,

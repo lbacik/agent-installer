@@ -1,4 +1,4 @@
-import { buildExposurePlan, planEntryToExposureState, readSymlinkTarget } from "./install.js";
+import { observeExposures, observeRecordedExposures } from "./exposures.js";
 import { buildLegacyExposureNotice } from "./format.js";
 import { resolveHome } from "./paths.js";
 import type { AgentInstallerConfig } from "./config.js";
@@ -156,7 +156,8 @@ export function removedArtifactStateToJson(state: RemovedArtifactState): JsonArt
 // against the installer's own recorded hashes, not against the source repository's
 // current content. With a config, a desired-but-missing exposure also counts as
 // drift (mirroring scan); without one, only the owned recorded links are checked.
-// Legacy exposures never affect the aggregate status; they only surface notices.
+// Legacy exposures never affect the aggregate status anywhere; they only surface
+// notices and per-exposure drift.
 export async function managedEntryToJson(
   entry: ManagedEntry,
   config?: AgentInstallerConfig | null,
@@ -165,65 +166,42 @@ export async function managedEntryToJson(
   const contentMatches = entry.sourceHash === entry.installedHash;
 
   if (config === undefined || config === null) {
-    const checks = await Promise.all(
-      entry.exposures.map(async (exposure) => ({
-        exposure,
-        owned: (await readSymlinkTarget(exposure.path)) === entry.basePath
-      }))
-    );
-    const exposureMatches = checks.every((check) => check.owned);
+    const { exposures, namedDrift } = await observeRecordedExposures(entry.exposures, entry.basePath, contentMatches);
 
     return {
       id: entry.id,
       kind: entry.kind,
       name: entry.name,
-      status: contentMatches && exposureMatches ? "installed-same" : "installed-different",
+      status: contentMatches && !namedDrift ? "installed-same" : "installed-different",
       sourceIdentity: entry.sourceRoot,
       relativeSourcePath: entry.relativeSourcePath,
       basePath: entry.basePath,
-      exposures: checks.map(({ exposure, owned }) => ({
-        targetName: exposure.targetName,
-        path: exposure.path,
-        status: owned
-          ? contentMatches
-            ? ("installed-same" as ArtifactStatus)
-            : ("installed-different" as ArtifactStatus)
-          : ("installed-different" as ArtifactStatus)
-      })),
+      exposures,
       sourceHash: entry.sourceHash,
       installedHash: entry.installedHash,
       ...provenanceFields(entry)
     };
   }
 
-  const desiredPlan = await buildExposurePlan(config, resolveHome(home), { kind: entry.kind, name: entry.name }, entry.basePath);
-  const exposures: ExposureState[] = desiredPlan.map((plan) => planEntryToExposureState(plan, contentMatches));
-
-  const plannedPaths = new Set(desiredPlan.map((plan) => plan.path));
-  for (const record of entry.exposures) {
-    if (record.targetName !== null || plannedPaths.has(record.path)) {
-      continue;
-    }
-
-    const owned = (await readSymlinkTarget(record.path)) === entry.basePath;
-    exposures.push({
-      targetName: null,
-      path: record.path,
-      status: owned
-        ? ((contentMatches ? "installed-same" : "installed-different") as ArtifactStatus)
-        : ("installed-different" as ArtifactStatus)
-    });
-  }
+  const observation = await observeExposures({
+    artifact: { kind: entry.kind, name: entry.name },
+    basePath: entry.basePath,
+    records: entry.exposures,
+    config,
+    home: resolveHome(home),
+    contentMatches,
+    baseIsNew: false
+  });
 
   return {
     id: entry.id,
     kind: entry.kind,
     name: entry.name,
-    status: contentMatches && desiredPlan.every((plan) => plan.status === "match") ? "installed-same" : "installed-different",
+    status: contentMatches && !observation.desiredDrift ? "installed-same" : "installed-different",
     sourceIdentity: entry.sourceRoot,
     relativeSourcePath: entry.relativeSourcePath,
     basePath: entry.basePath,
-    exposures,
+    exposures: observation.exposures,
     sourceHash: entry.sourceHash,
     installedHash: entry.installedHash,
     ...provenanceFields(entry)

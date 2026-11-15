@@ -3,7 +3,7 @@ import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { ConfigurationError } from "./errors.js";
-import { resolveHome, TargetPaths } from "./paths.js";
+import { resolveHome, resolveRealish, TargetPaths } from "./paths.js";
 import type { ExposureKind } from "./types.js";
 
 export type { ExposureKind } from "./types.js";
@@ -55,34 +55,6 @@ function isAllowedPathFormat(value: string): boolean {
 
 export function expandHome(value: string, home: string): string {
   return value.startsWith("~/") ? path.join(home, value.slice(2)) : value;
-}
-
-// Resolves a path's existing prefix via `fs.realpath` (so a configured directory
-// that is itself a symlink still compares by its real location) and falls back to
-// `path.resolve` for any trailing segments that do not exist yet.
-async function resolveRealish(targetPath: string): Promise<string> {
-  const resolved = path.resolve(targetPath);
-  const trailing: string[] = [];
-  let current = resolved;
-
-  while (true) {
-    try {
-      const real = await fs.realpath(current);
-      return trailing.length === 0 ? real : path.join(real, ...trailing.reverse());
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
-      }
-
-      const parent = path.dirname(current);
-      if (parent === current) {
-        return resolved;
-      }
-
-      trailing.push(path.basename(current));
-      current = parent;
-    }
-  }
 }
 
 function isNested(a: string, b: string): boolean {

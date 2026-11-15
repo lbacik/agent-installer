@@ -1,16 +1,11 @@
 import { AgentInstallerConfig, loadConfig } from "./config.js";
-import { buildExposurePlan, createOwnedSymlink, exposureKindOf, revalidateAndRemove } from "./install.js";
+import { planEntrySync, type EntrySyncPlan } from "./exposures.js";
+import { createOwnedSymlink, revalidateAndRemove } from "./install.js";
 import { resolveHome, resolveTargetPaths } from "./paths.js";
 import { loadState, saveState } from "./state.js";
 import { ExposureRecord, ManagedEntry, SkippedExposureRemoval, SyncAction, SyncActionKind, SyncLegacyNotice } from "./types.js";
 
 export type { SkippedExposureRemoval, SyncAction, SyncActionKind, SyncLegacyNotice } from "./types.js";
-
-interface EntrySyncPlan {
-  entry: ManagedEntry;
-  actions: SyncAction[];
-  legacyNotices: SyncLegacyNotice[];
-}
 
 export interface SyncOptions {
   only?: string[] | undefined;
@@ -99,71 +94,16 @@ function resolveScopeTargetNames(
   return new Set(requested);
 }
 
-// Read-only: computes what sync would do for one managed artifact by comparing its
-// recorded exposures against the exposure plan the current config.yaml desires, via the
-// same buildExposurePlan install uses. Never touches disk beyond the existence/symlink
-// checks buildExposurePlan itself performs.
-async function buildEntrySyncPlan(
+// Read-only: computes what sync would do for one managed artifact. Delegates to
+// the shared Tool Exposure reconciliation in `./exposures.js`; this module only
+// applies the resulting plan.
+function buildEntrySyncPlan(
   config: AgentInstallerConfig | null,
   home: string,
   entry: ManagedEntry,
   scopeTargetNames: Set<string> | null
 ): Promise<EntrySyncPlan> {
-  const kind = exposureKindOf(entry.kind);
-  const desiredPlan = await buildExposurePlan(config, home, { kind: entry.kind, name: entry.name }, entry.basePath);
-  const scopedDesired = scopeTargetNames === null ? desiredPlan : desiredPlan.filter((plan) => scopeTargetNames.has(plan.targetName));
-  const desiredByTarget = new Map(scopedDesired.map((plan) => [plan.targetName, plan]));
-
-  const recordByTarget = new Map<string, ExposureRecord>();
-  const legacyNotices: SyncLegacyNotice[] = [];
-
-  for (const record of entry.exposures) {
-    if (record.targetName === null) {
-      legacyNotices.push({ id: entry.id, path: record.path });
-      continue;
-    }
-
-    if (scopeTargetNames !== null && !scopeTargetNames.has(record.targetName)) {
-      continue;
-    }
-
-    recordByTarget.set(record.targetName, record);
-  }
-
-  const targetNames = new Set([...desiredByTarget.keys(), ...recordByTarget.keys()]);
-  const actions: SyncAction[] = [];
-
-  for (const targetName of targetNames) {
-    const desired = desiredByTarget.get(targetName);
-    const record = recordByTarget.get(targetName);
-
-    if (desired === undefined) {
-      // record is guaranteed here: targetName came from the union of both maps.
-      actions.push({ id: entry.id, targetName, kind, action: "remove-orphan", path: record!.path });
-      continue;
-    }
-
-    const reason = desired.status === "conflict" ? desired.reason : undefined;
-
-    if (record === undefined || record.path === desired.path) {
-      const action: SyncActionKind = desired.status === "conflict" ? "conflict" : desired.status === "match" ? "match" : "create";
-      actions.push({ id: entry.id, targetName, kind, action, path: desired.path, ...(reason === undefined ? {} : { reason }) });
-      continue;
-    }
-
-    const action: SyncActionKind = desired.status === "conflict" ? "conflict" : "move";
-    actions.push({
-      id: entry.id,
-      targetName,
-      kind,
-      action,
-      path: desired.path,
-      previousPath: record.path,
-      ...(reason === undefined ? {} : { reason })
-    });
-  }
-
-  return { entry, actions, legacyNotices };
+  return planEntrySync(entry, config, home, scopeTargetNames);
 }
 
 function removeRecordAtPath(records: ExposureRecord[], targetPath: string): ExposureRecord[] {
