@@ -3,6 +3,7 @@ import { hashArtifactContent, SKILL_TREE_ALGORITHM_V1 } from "./hash.js";
 import { getStoreRelativePath } from "./install.js";
 import { getMarkerPath, resolveTargetPaths } from "./paths.js";
 import { loadStateReadOnly } from "./state.js";
+import { isRemoteSourceIdentity } from "./source-resolver.js";
 import type {
   ContentFileRecord,
   ManagedEntry,
@@ -33,11 +34,6 @@ const REFUSAL_MESSAGES: Record<VerifyRefusalCode, string> = {
 
 function refusal(code: VerifyRefusalCode, message?: string): VerifyRefusal {
   return { code, message: message ?? REFUSAL_MESSAGES[code] };
-}
-
-/** A remote Git source identity always carries the sanitized-URL `git+` prefix; local sources are real paths. */
-function isGitSource(sourceRoot: string): boolean {
-  return sourceRoot.startsWith("git+");
 }
 
 function nullProvenance(value: string | undefined): string | null {
@@ -142,7 +138,7 @@ async function verifyOwned(
     refusals.push(refusal("unsupported-algorithm"));
   }
 
-  if (isGitSource(entry.sourceRoot) && entry.resolvedCommit == null) {
+  if (isRemoteSourceIdentity(entry.sourceRoot) && entry.resolvedCommit == null) {
     refusals.push(refusal("provenance-missing"));
   }
 

@@ -171,6 +171,11 @@ export function sanitizeRemoteSourceIdentity(input: string): string {
   return `git+${url.toString()}`;
 }
 
+/** A remote source identity always carries the sanitized-URL `git+` prefix; local sources are real paths. */
+export function isRemoteSourceIdentity(identity: string): boolean {
+  return identity.startsWith("git+");
+}
+
 async function removeTempDir(tempDir: string): Promise<void> {
   await fs.rm(tempDir, { recursive: true, force: true });
 }
