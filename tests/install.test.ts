@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { SourceConfigurationError } from "../src/errors.js";
 import { collectLegacyNotices } from "../src/format.js";
 import { hashArtifact } from "../src/hash.js";
 import { collectArtifactStates, installAllFromSource, installArtifacts, removeArtifacts } from "../src/install.js";
@@ -422,6 +423,56 @@ describe("install --only selection", () => {
 
     expect(installed.map((entry) => entry.id)).toEqual(["skill:review"]);
     expect(conflicts.map((state) => state.id)).toEqual(["prompt:commit-message"]);
+  });
+});
+
+describe("install --only source-wide validation", () => {
+  it("aborts on a symlink in an unselected skill, installing nothing", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    await writeSkill(repo, "good", "# Good\n");
+    const badPath = await writeSkill(repo, "bad", "# Bad\n");
+    await fs.writeFile(path.join(badPath, "target.txt"), "content\n", "utf8");
+    await fs.symlink(path.join(badPath, "target.txt"), path.join(badPath, "shortcut.txt"));
+
+    // --only selects the clean skill, but source validation covers the whole
+    // scanned source, so the defect in the unselected skill aborts the run.
+    const error = await installAllFromSource(repo, home, undefined, undefined, { only: ["skill:good"] }).then(
+      () => {
+        throw new Error("expected install --only to reject on the unselected skill's symlink");
+      },
+      (failure: unknown) => failure
+    );
+    expect(error).toBeInstanceOf(SourceConfigurationError);
+    expect((error as Error).message).toMatch(/shortcut\.txt/);
+
+    // The abort happens before any managed path is touched: neither the
+    // selected nor the defective skill leaves a base-store copy or state entry.
+    const paths = resolveTargetPaths(home);
+    await expect(fs.access(paths.agentsSkillsDir)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await loadState(paths)).entries).toEqual([]);
+  });
+
+  it("aborts on unmergeable authored metadata in an unselected skill, installing nothing", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    await writeSkill(repo, "good", "# Good\n");
+    const badPath = await writeSkill(repo, "bad", skillWithFrontmatter("disable-model-invocation: true"));
+    await writeCodexMetadata(badPath, "just-a-string\n");
+
+    const error = await installAllFromSource(repo, home, undefined, undefined, { only: ["skill:good"] }).then(
+      () => {
+        throw new Error("expected install --only to reject on the unselected skill's authored metadata");
+      },
+      (failure: unknown) => failure
+    );
+    expect(error).toBeInstanceOf(SourceConfigurationError);
+    expect((error as Error).message).toMatch(/agents[\\/]openai\.yaml/);
+    expect((error as Error).message).toMatch(/disable-model-invocation/);
+
+    const paths = resolveTargetPaths(home);
+    await expect(fs.access(paths.agentsSkillsDir)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await loadState(paths)).entries).toEqual([]);
   });
 });
 
