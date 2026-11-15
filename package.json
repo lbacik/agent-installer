@@ -1,6 +1,6 @@
 {
   "name": "agent-installer",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Install Codex skills and Claude Code skills and commands from a local repository.",
   "type": "module",
   "files": [
@@ -42,7 +42,7 @@
     "tsup": "^8.5.0",
     "tsx": "^4.20.3",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.0"
+    "vitest": "5.0.5"
   },
   "packageManager": "pnpm@10.32.1"
 }
