@@ -1,3 +1,4 @@
+import { KEPT_FOREIGN_REASON } from "./exposure-mutations.js";
 import { observeExposures, observeRecordedExposures } from "./exposures.js";
 import { buildLegacyExposureNotice } from "./format.js";
 import { resolveHome } from "./paths.js";
@@ -331,14 +332,14 @@ export function buildSyncJson(result: SyncResult): SyncJsonOutput {
         path: outcome.path,
         action: "create"
       });
-    } else if (outcome.outcome === "moved" && outcome.fromPath !== undefined) {
+    } else if (outcome.outcome === "moved") {
       applied.push({
         id: outcome.id,
         targetName: outcome.targetName ?? "legacy",
         kind: outcome.kind,
         path: outcome.path,
         action: "move",
-        fromPath: outcome.fromPath
+        ...(outcome.fromPath === undefined ? {} : { fromPath: outcome.fromPath })
       });
     } else if (outcome.outcome === "removed") {
       applied.push({
@@ -360,7 +361,7 @@ export function buildSyncJson(result: SyncResult): SyncJsonOutput {
         id: outcome.id,
         targetName: outcome.targetName ?? "legacy",
         path: outcome.fromPath ?? outcome.path,
-        conflictReason: outcome.reason ?? "Exposure path is no longer an owned symlink, so it was left alone."
+        conflictReason: outcome.reason ?? KEPT_FOREIGN_REASON
       });
     }
   }
@@ -374,7 +375,7 @@ export function buildSyncJson(result: SyncResult): SyncJsonOutput {
         id: removal.id,
         targetName: removal.targetName ?? "legacy",
         path: removal.path,
-        conflictReason: "Exposure path is no longer an owned symlink, so it was left alone."
+        conflictReason: KEPT_FOREIGN_REASON
       });
     }
   }

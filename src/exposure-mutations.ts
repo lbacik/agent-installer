@@ -40,12 +40,6 @@ export async function tryCreateOwnedSymlink(
   return { ok: false, reason: `Exposure path ${targetPath} did not verify as a symlink to the managed copy after creation.` };
 }
 
-// Creates (or repairs) one owned exposure symlink and verifies it actually resolves to
-// basePath afterward.
-export async function createOwnedSymlink(basePath: string, targetPath: string): Promise<boolean> {
-  return (await tryCreateOwnedSymlink(basePath, targetPath)).ok;
-}
-
 export type RevalidatedRemoval = "removed" | "already-gone" | "foreign";
 
 // Immediately before deleting an exposure symlink, revalidates it is still an owned
