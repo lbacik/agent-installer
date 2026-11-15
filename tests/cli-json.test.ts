@@ -208,6 +208,30 @@ describe("install --json", () => {
   });
 });
 
+describe("install --json --json-schema 3 source-wide validation", () => {
+  it("reports error code source-configuration when an unselected skill is defective", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    const badDir = path.join(repo, "skills", "bad");
+    await fs.mkdir(badDir, { recursive: true });
+    await fs.writeFile(path.join(badDir, "SKILL.md"), "# Bad\n", "utf8");
+    await fs.writeFile(path.join(badDir, "target.txt"), "content\n", "utf8");
+    await fs.symlink(path.join(badDir, "target.txt"), path.join(badDir, "shortcut.txt"));
+
+    const result = await runCli(["install", repo, "--only", "skill:review", "--json", "--json-schema", "3"], home);
+
+    expect(result.exitCode).not.toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as {
+      outcome?: string;
+      error?: { code?: string; message?: string };
+    };
+    expect(parsed.outcome).toBe("aborted");
+    expect(parsed.error?.code).toBe("source-configuration");
+    expect(parsed.error?.message).toMatch(/shortcut\.txt/);
+    await expect(fs.access(path.join(home, ".agents", "skills"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
 describe("list --json", () => {
   it("produces output non-interactively with no managed artifacts", async () => {
     const home = await makeTempDir("agent-installer-cli-home-");

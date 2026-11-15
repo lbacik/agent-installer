@@ -92,6 +92,9 @@ Implemented commands:
     selectors, and installs nothing
   - applied to the reconciled set, so conflict handling (including `--allow-conflicts`) behaves as it does under
     `--all`; unselected artifacts are left untouched
+  - source validation is source-wide, not scoped to the selection: a source-configuration error in any discovered
+    artifact aborts the whole run before anything is installed, even when the offending artifact is not selected;
+    `--only` narrows what gets installed, not what gets validated
 - `agent-installer install [path] --all --prune` (or `--only ... --prune`)
   - `--prune` deletes managed files: it removes the base-store copy, every recorded exposure symlink, and the state
     entry for every artifact reconciled as `source-missing` for the scanned source
