@@ -40,7 +40,7 @@ export type { ExposureConflictSummary } from "./types.js";
 // that owns Tool Exposure observation.
 export { buildExposurePlan, exposureKindOf, planEntryToExposureState, readSymlinkTarget } from "./exposures.js";
 
-export function collectExposureConflicts(states: ArtifactState[]): ExposureConflictSummary[] {
+function collectExposureConflicts(states: ArtifactState[]): ExposureConflictSummary[] {
   return states.flatMap((state) =>
     state.exposurePlan
       .filter((entry) => entry.status === "conflict")
@@ -709,14 +709,29 @@ function buildErrorOutcome(
  * failures) are encoded in the outcome, never thrown; source, config, and
  * scan errors still throw for the caller to classify.
  */
-export async function runInstall(request: InstallRequest): Promise<InstallAllResult> {
-  const { withScannedSource } = await import("./source-workflow.js");
-  return withScannedSource(
-    request.sourcePath,
-    { home: request.home, scanOptions: request.scanOptions, resolveOptions: request.resolveOptions },
-    async ({ states, removed, resolvedCommit }) => {
-      const paths = resolveTargetPaths(request.home);
-      const config = await loadConfig(paths, request.home);
+export interface InstallFromStatesOptions {
+  home?: string | undefined;
+  allowConflicts?: boolean | undefined;
+  only?: string[] | undefined;
+  prune?: boolean | undefined;
+  resolvedCommit?: string | undefined;
+}
+
+/**
+ * The single install decision module (select -> partition -> gate -> apply).
+ * Operates on already-reconciled states so callers that scanned once (for
+ * example interactive mode, which shows the picker exactly these states) never
+ * resolve or scan the source a second time. `runInstall` is the
+ * resolve-and-scan wrapper around it.
+ */
+async function executeInstallDecision(
+  states: ArtifactState[],
+  removed: RemovedArtifactState[],
+  resolvedCommit: string | undefined,
+  decision: InstallFromStatesOptions
+): Promise<InstallAllResult> {
+      const paths = resolveTargetPaths(decision.home);
+      const config = await loadConfig(paths, decision.home);
 
     const empty: Omit<InstallAllResult, "states" | "outcome"> = {
       installed: [],
@@ -730,8 +745,8 @@ export async function runInstall(request: InstallRequest): Promise<InstallAllRes
     // with every matched artifact recorded as not-attempted.
     let selectedStates: ArtifactState[];
     let unmatchedSelectors: string[] = [];
-    if (request.only !== undefined) {
-      const partitioned = partitionSelectedById(states, (state) => state.id, request.only);
+    if (decision.only !== undefined) {
+      const partitioned = partitionSelectedById(states, (state) => state.id, decision.only);
       unmatchedSelectors = partitioned.unmatched;
       selectedStates = partitioned.matched;
       if (unmatchedSelectors.length > 0) {
@@ -754,7 +769,7 @@ export async function runInstall(request: InstallRequest): Promise<InstallAllRes
     // Strict-mode refusal: nothing is installed; base conflicts record as
     // conflict with no exposures (never evaluated), exposure conflicts record
     // as conflict with their pairs structured in exposures[].
-    if (conflictsShouldBlock(conflicts.length + exposureConflicts.length, request.allowConflicts)) {
+    if (conflictsShouldBlock(conflicts.length + exposureConflicts.length, decision.allowConflicts)) {
       const exposureConflictIds = new Set(exposureConflicts.map((conflict) => conflict.id));
       const outcome: InstallOutcome = {
         ...buildErrorOutcome(paths, "conflict", conflictMessage(conflicts, exposureConflicts), {
@@ -867,7 +882,7 @@ export async function runInstall(request: InstallRequest): Promise<InstallAllRes
     // installed-different artifacts with matching content already advanced
     // through executeArtifactInstall above.
     if (resolvedCommit !== undefined) {
-      await refreshUnchangedProvenance(selectedStates, request.home);
+      await refreshUnchangedProvenance(selectedStates, decision.home);
     }
 
     for (const current of selectedStates) {
@@ -885,8 +900,8 @@ export async function runInstall(request: InstallRequest): Promise<InstallAllRes
     let pruned: RemovedArtifactState[] = [];
     let prunedSkippedExposures: SkippedExposureRemoval[] = [];
     let prunedOutcomes: InstallPrunedOutcome[] = [];
-    if (request.prune === true && removed.length > 0) {
-      const pruneResult = await removeArtifacts(removed.map((entry) => entry.id), request.home);
+    if (decision.prune === true && removed.length > 0) {
+      const pruneResult = await removeArtifacts(removed.map((entry) => entry.id), decision.home);
       pruned = removed;
       prunedSkippedExposures = pruneResult.skippedExposures;
       const skippedById = new Map<string, Set<string>>();
@@ -935,7 +950,41 @@ export async function runInstall(request: InstallRequest): Promise<InstallAllRes
     };
 
     return { states, installed, conflicts, exposureConflicts, pruned, prunedSkippedExposures, outcome };
-    }
+}
+
+/**
+ * Runs the install decision on already-reconciled states. Interactive mode
+ * scans once for the picker, then applies the picker's selection here with
+ * `allowConflicts: true` (skip and report, never abort) instead of
+ * re-resolving or re-scanning the source.
+ */
+export async function runInstallFromStates(
+  states: ArtifactState[],
+  removed: RemovedArtifactState[],
+  options: InstallFromStatesOptions = {}
+): Promise<InstallAllResult> {
+  return executeInstallDecision(states, removed, options.resolvedCommit, options);
+}
+
+/**
+ * Runs a full install and returns the versioned, complete Install Outcome:
+ * exactly one record per requested artifact on success and on every failure
+ * path. Classified failures (unmatched selectors, strict conflicts, mid-run
+ * failures) are encoded in the outcome, never thrown; source, config, and
+ * scan errors still throw for the caller to classify.
+ */
+export async function runInstall(request: InstallRequest): Promise<InstallAllResult> {
+  const { withScannedSource } = await import("./source-workflow.js");
+  return withScannedSource(
+    request.sourcePath,
+    { home: request.home, scanOptions: request.scanOptions, resolveOptions: request.resolveOptions },
+    async ({ states, removed, resolvedCommit }) =>
+      executeInstallDecision(states, removed, resolvedCommit, {
+        home: request.home,
+        allowConflicts: request.allowConflicts,
+        only: request.only,
+        prune: request.prune
+      })
   );
 }
 
