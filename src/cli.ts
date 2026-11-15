@@ -549,7 +549,26 @@ function createProgram(): Command {
             console.log(`planned ${printable.length} change(s)`);
           }
 
-          printLines(printable.map(formatSyncActionLine));
+          // Human output must not claim an action succeeded when it did not:
+          // failed or kept-foreign actions never print as performed. Kept-foreign
+          // skips already report below via skippedOrphanRemovals; failures report here.
+          const unperformedKeys = new Set(
+            result.outcomes
+              .filter((outcome) => outcome.outcome === "failed" || outcome.outcome === "kept-foreign")
+              .map((outcome) => `${outcome.id}\n${outcome.path}`)
+          );
+          const performed = result.dryRun
+            ? printable
+            : printable.filter((action) => !unperformedKeys.has(`${action.id}\n${action.path}`));
+
+          printLines(performed.map(formatSyncActionLine));
+          for (const outcome of result.outcomes) {
+            if (outcome.outcome === "failed") {
+              console.error(
+                `failed ${outcome.id} -> ${outcome.targetName ?? "legacy"}:${outcome.path} (${outcome.reason ?? "Exposure creation failed."})`
+              );
+            }
+          }
           const conflictPrefix = result.dryRun ? "would skip" : "skipped";
           for (const conflict of conflicts) {
             console.error(`${conflictPrefix} ${formatSyncActionLine(conflict)}`);

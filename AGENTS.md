@@ -175,6 +175,8 @@ Reconciliation has no status for an unusable source. A skill whose Claude frontm
 - [src/interactive.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/interactive.ts:1): interactive selection UI
 - [src/config.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/config.ts:1): `config.yaml` schema, loading, and path validation
 - [src/config-init.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/config-init.ts:1): interactive `config init` flow
+- [src/exposure-mutations.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/exposure-mutations.ts:1): shared ownership-revalidating exposure mutation step
+- [src/selection.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/selection.ts:1): shared selector and conflict-gate helpers
 
 ## Working Rules
 
