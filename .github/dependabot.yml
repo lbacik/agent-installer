@@ -9,6 +9,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # @types/node tracks the lowest supported runtime (engines.node), not
+      # the newest Node release. Newer majors would type-check APIs that the
+      # supported runtimes lack, so its major moves only with engines.node.
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
     groups:
       dev-dependencies:
         dependency-type: development
