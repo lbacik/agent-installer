@@ -92,6 +92,9 @@ Implemented commands:
     selectors, and installs nothing
   - applied to the reconciled set, so conflict handling (including `--allow-conflicts`) behaves as it does under
     `--all`; unselected artifacts are left untouched
+  - source validation is source-wide, not scoped to the selection: a source-configuration error in any discovered
+    artifact aborts the whole run before anything is installed, even when the offending artifact is not selected;
+    `--only` narrows what gets installed, not what gets validated
 - `agent-installer install [path] --all --prune` (or `--only ... --prune`)
   - `--prune` deletes managed files: it removes the base-store copy, every recorded exposure symlink, and the state
     entry for every artifact reconciled as `source-missing` for the scanned source
@@ -172,6 +175,8 @@ Reconciliation has no status for an unusable source. A skill whose Claude frontm
 - [src/interactive.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/interactive.ts:1): interactive selection UI
 - [src/config.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/config.ts:1): `config.yaml` schema, loading, and path validation
 - [src/config-init.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/config-init.ts:1): interactive `config init` flow
+- [src/exposure-mutations.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/exposure-mutations.ts:1): shared ownership-revalidating exposure mutation step
+- [src/selection.ts](/Volumes/Sources/js/ts/ai-skill-installer/src/selection.ts:1): shared selector and conflict-gate helpers
 
 ## Working Rules
 
@@ -204,8 +209,23 @@ Key tests live in:
 
 ## Release
 
-CI runs typecheck, tests, build, and the package smoke test on Node 20, 22, and
-24 for every pull request. Publishing is automated: pushing a `v*` tag runs
+CI runs typecheck, tests, build, and the package smoke test on Node 22, 24, and
+26 for every pull request.
+
+### Node support policy
+
+- Support only Node release lines that are still maintained upstream. Drop a line
+  once it reaches end-of-life (Node 22: 2027-04-30), and add each new LTS line to
+  the CI matrix when it is promoted (each October).
+- `engines.node` is the lowest supported line, raised further if a runtime
+  dependency's own `engines.node` demands it. pnpm only warns on an engines
+  mismatch, so a passing CI job does not prove compatibility; check runtime
+  dependencies' `engines` when bumping them.
+- Keep these in step with `engines.node`: the CI matrix, the `tsup` target, the
+  `@types/node` major, the README prerequisite, and the required `verify (<n>)`
+  checks in the `develop` and `main` rulesets.
+- Dropping a Node line is a breaking change for users on it: release it as a
+  minor bump while the package is 0.x. Publishing is automated: pushing a `v*` tag runs
 [.github/workflows/release.yml](/Volumes/Sources/js/ts/ai-skill-installer/.github/workflows/release.yml:1),
 which publishes to npm through OIDC trusted publishing. There is no npm token in
 the repository.

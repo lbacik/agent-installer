@@ -1,4 +1,5 @@
-import { buildExposurePlan, planEntryToExposureState, readSymlinkTarget } from "./install.js";
+import { KEPT_FOREIGN_REASON } from "./exposure-mutations.js";
+import { observeExposures, observeRecordedExposures } from "./exposures.js";
 import { buildLegacyExposureNotice } from "./format.js";
 import { resolveHome } from "./paths.js";
 import type { AgentInstallerConfig } from "./config.js";
@@ -156,7 +157,8 @@ export function removedArtifactStateToJson(state: RemovedArtifactState): JsonArt
 // against the installer's own recorded hashes, not against the source repository's
 // current content. With a config, a desired-but-missing exposure also counts as
 // drift (mirroring scan); without one, only the owned recorded links are checked.
-// Legacy exposures never affect the aggregate status; they only surface notices.
+// Legacy exposures never affect the aggregate status anywhere; they only surface
+// notices and per-exposure drift.
 export async function managedEntryToJson(
   entry: ManagedEntry,
   config?: AgentInstallerConfig | null,
@@ -165,65 +167,42 @@ export async function managedEntryToJson(
   const contentMatches = entry.sourceHash === entry.installedHash;
 
   if (config === undefined || config === null) {
-    const checks = await Promise.all(
-      entry.exposures.map(async (exposure) => ({
-        exposure,
-        owned: (await readSymlinkTarget(exposure.path)) === entry.basePath
-      }))
-    );
-    const exposureMatches = checks.every((check) => check.owned);
+    const { exposures, namedDrift } = await observeRecordedExposures(entry.exposures, entry.basePath, contentMatches);
 
     return {
       id: entry.id,
       kind: entry.kind,
       name: entry.name,
-      status: contentMatches && exposureMatches ? "installed-same" : "installed-different",
+      status: contentMatches && !namedDrift ? "installed-same" : "installed-different",
       sourceIdentity: entry.sourceRoot,
       relativeSourcePath: entry.relativeSourcePath,
       basePath: entry.basePath,
-      exposures: checks.map(({ exposure, owned }) => ({
-        targetName: exposure.targetName,
-        path: exposure.path,
-        status: owned
-          ? contentMatches
-            ? ("installed-same" as ArtifactStatus)
-            : ("installed-different" as ArtifactStatus)
-          : ("installed-different" as ArtifactStatus)
-      })),
+      exposures,
       sourceHash: entry.sourceHash,
       installedHash: entry.installedHash,
       ...provenanceFields(entry)
     };
   }
 
-  const desiredPlan = await buildExposurePlan(config, resolveHome(home), { kind: entry.kind, name: entry.name }, entry.basePath);
-  const exposures: ExposureState[] = desiredPlan.map((plan) => planEntryToExposureState(plan, contentMatches));
-
-  const plannedPaths = new Set(desiredPlan.map((plan) => plan.path));
-  for (const record of entry.exposures) {
-    if (record.targetName !== null || plannedPaths.has(record.path)) {
-      continue;
-    }
-
-    const owned = (await readSymlinkTarget(record.path)) === entry.basePath;
-    exposures.push({
-      targetName: null,
-      path: record.path,
-      status: owned
-        ? ((contentMatches ? "installed-same" : "installed-different") as ArtifactStatus)
-        : ("installed-different" as ArtifactStatus)
-    });
-  }
+  const observation = await observeExposures({
+    artifact: { kind: entry.kind, name: entry.name },
+    basePath: entry.basePath,
+    records: entry.exposures,
+    config,
+    home: resolveHome(home),
+    contentMatches,
+    baseIsNew: false
+  });
 
   return {
     id: entry.id,
     kind: entry.kind,
     name: entry.name,
-    status: contentMatches && desiredPlan.every((plan) => plan.status === "match") ? "installed-same" : "installed-different",
+    status: contentMatches && !observation.desiredDrift ? "installed-same" : "installed-different",
     sourceIdentity: entry.sourceRoot,
     relativeSourcePath: entry.relativeSourcePath,
     basePath: entry.basePath,
-    exposures,
+    exposures: observation.exposures,
     sourceHash: entry.sourceHash,
     installedHash: entry.installedHash,
     ...provenanceFields(entry)
@@ -317,6 +296,7 @@ export function syncConflictToSkipped(action: SyncAction): JsonSyncSkipped {
 
 export function buildSyncJson(result: SyncResult): SyncJsonOutput {
   const planned: JsonSyncAction[] = [];
+  const applied: JsonSyncAction[] = [];
   const skipped: JsonSyncSkipped[] = [];
 
   for (const action of result.actions) {
@@ -338,13 +318,66 @@ export function buildSyncJson(result: SyncResult): SyncJsonOutput {
     }
   }
 
-  for (const removal of result.skippedOrphanRemovals) {
-    skipped.push({
-      id: removal.id,
-      targetName: removal.targetName ?? "legacy",
-      path: removal.path,
-      conflictReason: "Exposure path is no longer an owned symlink, so it was left alone."
-    });
+  // `applied` reflects what actually happened (per-action outcomes), never the
+  // plan: only created/moved/removed outcomes land here. Failed and kept-foreign
+  // outcomes land exactly once in `skipped`, never in `applied`. Dry runs apply
+  // nothing, so `applied` stays empty while `planned` still shows the intent.
+  const outcomes = result.outcomes ?? [];
+  for (const outcome of outcomes) {
+    if (outcome.outcome === "created") {
+      applied.push({
+        id: outcome.id,
+        targetName: outcome.targetName ?? "legacy",
+        kind: outcome.kind,
+        path: outcome.path,
+        action: "create"
+      });
+    } else if (outcome.outcome === "moved") {
+      applied.push({
+        id: outcome.id,
+        targetName: outcome.targetName ?? "legacy",
+        kind: outcome.kind,
+        path: outcome.path,
+        action: "move",
+        ...(outcome.fromPath === undefined ? {} : { fromPath: outcome.fromPath })
+      });
+    } else if (outcome.outcome === "removed") {
+      applied.push({
+        id: outcome.id,
+        targetName: outcome.targetName ?? "legacy",
+        kind: outcome.kind,
+        path: outcome.path,
+        action: "remove"
+      });
+    } else if (outcome.outcome === "failed") {
+      skipped.push({
+        id: outcome.id,
+        targetName: outcome.targetName ?? "legacy",
+        path: outcome.path,
+        conflictReason: outcome.reason ?? "Exposure creation failed."
+      });
+    } else if (outcome.outcome === "kept-foreign") {
+      skipped.push({
+        id: outcome.id,
+        targetName: outcome.targetName ?? "legacy",
+        path: outcome.fromPath ?? outcome.path,
+        conflictReason: outcome.reason ?? KEPT_FOREIGN_REASON
+      });
+    }
+  }
+
+  // Back-compat: callers that predate per-action outcomes only carry
+  // skippedOrphanRemovals. Outcomes already encode the same skips, so only fall
+  // back when no outcomes were recorded at all.
+  if (outcomes.length === 0) {
+    for (const removal of result.skippedOrphanRemovals) {
+      skipped.push({
+        id: removal.id,
+        targetName: removal.targetName ?? "legacy",
+        path: removal.path,
+        conflictReason: KEPT_FOREIGN_REASON
+      });
+    }
   }
 
   const notices = result.legacyNotices.map(
@@ -355,7 +388,7 @@ export function buildSyncJson(result: SyncResult): SyncJsonOutput {
     {
       schemaVersion: JSON_SCHEMA_VERSION,
       planned,
-      applied: result.dryRun ? [] : planned,
+      applied: result.dryRun ? [] : applied,
       skipped
     },
     notices

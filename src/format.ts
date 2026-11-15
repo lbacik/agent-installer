@@ -1,5 +1,6 @@
 import pc from "picocolors";
 import path from "node:path";
+import { isRemoteSourceIdentity } from "./source-resolver.js";
 import {
   ArtifactState,
   ArtifactStatus,
@@ -101,7 +102,7 @@ export function formatRemovedLine(state: RemovedArtifactState): string {
 }
 
 function formatSourcePath(sourceRoot: string, relativeSourcePath: string): string {
-  if (sourceRoot.startsWith("git+https://")) {
+  if (isRemoteSourceIdentity(sourceRoot)) {
     return `${sourceRoot}/${relativeSourcePath}`;
   }
 

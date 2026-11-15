@@ -1,3 +1,4 @@
+import { promises as fs } from "node:fs";
 import path from "node:path";
 import { ArtifactKind, DiscoveredArtifact } from "./types.js";
 
@@ -61,6 +62,36 @@ export function resolveExposurePath(targetDir: string, artifact: Pick<Discovered
 
 export function toSystemPath(basePath: string, relativePath: string): string {
   return path.join(basePath, ...relativePath.split("/"));
+}
+
+// Resolves a path's existing prefix via `fs.realpath` (so a configured directory
+// that is itself a symlink still compares by its real location) and falls back to
+// `path.resolve` for any trailing segments that do not exist yet. Shared by the
+// config validator and the Tool Exposure reconciliation so both compare the same
+// spellings the same way.
+export async function resolveRealish(targetPath: string): Promise<string> {
+  const resolved = path.resolve(targetPath);
+  const trailing: string[] = [];
+  let current = resolved;
+
+  while (true) {
+    try {
+      const real = await fs.realpath(current);
+      return trailing.length === 0 ? real : path.join(real, ...trailing.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+
+      const parent = path.dirname(current);
+      if (parent === current) {
+        return resolved;
+      }
+
+      trailing.push(path.basename(current));
+      current = parent;
+    }
+  }
 }
 
 export function getMarkerPath(basePath: string, kind: ArtifactKind): string {

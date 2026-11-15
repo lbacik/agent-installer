@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
+import { SourceConfigurationError } from "../src/errors.js";
 import { collectLegacyNotices } from "../src/format.js";
 import { hashArtifact } from "../src/hash.js";
 import { collectArtifactStates, installAllFromSource, installArtifacts, removeArtifacts } from "../src/install.js";
@@ -61,7 +62,8 @@ async function writeConfigYaml(paths: ReturnType<typeof resolveTargetPaths>, yam
 
 async function installAll(repo: string, home: string): Promise<void> {
   const artifacts = await scanSourceRepository(repo);
-  const { states } = await collectArtifactStates(artifacts, home);
+  const sourceIdentity = await fs.realpath(repo);
+  const { states } = await collectArtifactStates(artifacts, home, sourceIdentity);
   await installArtifacts(
     states.filter((state) => state.status === "new" || state.status === "installed-different"),
     home
@@ -70,7 +72,7 @@ async function installAll(repo: string, home: string): Promise<void> {
 
 async function statusOf(repo: string, home: string, id: string): Promise<string | undefined> {
   const artifacts = await scanSourceRepository(repo);
-  const { states } = await collectArtifactStates(artifacts, home);
+  const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
   return states.find((state) => state.id === id)?.status;
 }
 
@@ -100,7 +102,7 @@ describe("install lifecycle", () => {
     const home = await makeTempDir("agent-installer-home-");
 
     const artifacts = await scanSourceRepository(repo);
-    const { states } = await collectArtifactStates(artifacts, home);
+    const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
     await installArtifacts(states, home);
 
     const paths = resolveTargetPaths(home);
@@ -121,12 +123,12 @@ describe("install lifecycle", () => {
     const home = await makeTempDir("agent-installer-home-");
 
     const artifacts = await scanSourceRepository(repo);
-    const initial = await collectArtifactStates(artifacts, home);
+    const initial = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
     await installArtifacts(initial.states, home);
 
     await fs.writeFile(path.join(repo, "prompts", "commit-message.md"), "updated prompt\n", "utf8");
     const rescanned = await scanSourceRepository(repo);
-    const next = await collectArtifactStates(rescanned, home);
+    const next = await collectArtifactStates(rescanned, home, await fs.realpath(repo));
 
     expect(next.states.find((state) => state.id === "prompt:commit-message")?.status).toBe("installed-different");
     expect(next.states.find((state) => state.id === "skill:review")?.status).toBe("installed-same");
@@ -140,7 +142,7 @@ describe("install lifecycle", () => {
     await fs.writeFile(path.join(paths.agentsPromptsDir, "commit-message.md"), "user-owned\n", "utf8");
 
     const artifacts = await scanSourceRepository(repo);
-    const { states } = await collectArtifactStates(artifacts, home);
+    const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
 
     expect(states.find((state) => state.id === "prompt:commit-message")?.status).toBe("conflict");
   });
@@ -150,12 +152,12 @@ describe("install lifecycle", () => {
     const home = await makeTempDir("agent-installer-home-");
 
     const artifacts = await scanSourceRepository(repo);
-    const initial = await collectArtifactStates(artifacts, home);
+    const initial = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
     await installArtifacts(initial.states, home);
 
     await fs.rm(path.join(repo, "prompts", "commit-message.md"));
     const rescanned = await scanSourceRepository(repo);
-    const next = await collectArtifactStates(rescanned, home, repo);
+    const next = await collectArtifactStates(rescanned, home, await fs.realpath(repo));
 
     expect(next.removed.map((entry) => entry.id)).toEqual(["prompt:commit-message"]);
   });
@@ -166,11 +168,11 @@ describe("install lifecycle", () => {
     const home = await makeTempDir("agent-installer-home-");
 
     const artifacts = await scanSourceRepository(repoA);
-    const initial = await collectArtifactStates(artifacts, home, repoA);
+    const initial = await collectArtifactStates(artifacts, home, await fs.realpath(repoA));
     await installArtifacts(initial.states, home);
 
     const emptyScan = await scanSourceRepository(repoB);
-    const next = await collectArtifactStates(emptyScan, home, repoB);
+    const next = await collectArtifactStates(emptyScan, home, await fs.realpath(repoB));
 
     expect(next.removed).toEqual([]);
   });
@@ -287,7 +289,7 @@ describe("install lifecycle", () => {
     const home = await makeTempDir("agent-installer-home-");
 
     const artifacts = await scanSourceRepository(repo);
-    const { states } = await collectArtifactStates(artifacts, home);
+    const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
     await installArtifacts(states, home);
 
     const paths = resolveTargetPaths(home);
@@ -425,6 +427,56 @@ describe("install --only selection", () => {
   });
 });
 
+describe("install --only source-wide validation", () => {
+  it("aborts on a symlink in an unselected skill, installing nothing", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    await writeSkill(repo, "good", "# Good\n");
+    const badPath = await writeSkill(repo, "bad", "# Bad\n");
+    await fs.writeFile(path.join(badPath, "target.txt"), "content\n", "utf8");
+    await fs.symlink(path.join(badPath, "target.txt"), path.join(badPath, "shortcut.txt"));
+
+    // --only selects the clean skill, but source validation covers the whole
+    // scanned source, so the defect in the unselected skill aborts the run.
+    const error = await installAllFromSource(repo, home, undefined, undefined, { only: ["skill:good"] }).then(
+      () => {
+        throw new Error("expected install --only to reject on the unselected skill's symlink");
+      },
+      (failure: unknown) => failure
+    );
+    expect(error).toBeInstanceOf(SourceConfigurationError);
+    expect((error as Error).message).toMatch(/shortcut\.txt/);
+
+    // The abort happens before any managed path is touched: neither the
+    // selected nor the defective skill leaves a base-store copy or state entry.
+    const paths = resolveTargetPaths(home);
+    await expect(fs.access(paths.agentsSkillsDir)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await loadState(paths)).entries).toEqual([]);
+  });
+
+  it("aborts on unmergeable authored metadata in an unselected skill, installing nothing", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    await writeSkill(repo, "good", "# Good\n");
+    const badPath = await writeSkill(repo, "bad", skillWithFrontmatter("disable-model-invocation: true"));
+    await writeCodexMetadata(badPath, "just-a-string\n");
+
+    const error = await installAllFromSource(repo, home, undefined, undefined, { only: ["skill:good"] }).then(
+      () => {
+        throw new Error("expected install --only to reject on the unselected skill's authored metadata");
+      },
+      (failure: unknown) => failure
+    );
+    expect(error).toBeInstanceOf(SourceConfigurationError);
+    expect((error as Error).message).toMatch(/agents[\\/]openai\.yaml/);
+    expect((error as Error).message).toMatch(/disable-model-invocation/);
+
+    const paths = resolveTargetPaths(home);
+    await expect(fs.access(paths.agentsSkillsDir)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await loadState(paths)).entries).toEqual([]);
+  });
+});
+
 describe("install --prune", () => {
   it("leaves source-missing artifacts installed when --prune is not passed", async () => {
     const repo = await makeRepo();
@@ -457,6 +509,45 @@ describe("install --prune", () => {
     await expect(fs.access(path.join(paths.agentsPromptsDir, "commit-message.md"))).rejects.toMatchObject({
       code: "ENOENT"
     });
+  });
+
+  it("prunes everything when the source no longer offers any artifacts", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-home-");
+    const paths = resolveTargetPaths(home);
+    const claudeSkills = path.join(home, "claude-skills");
+    const claudePrompts = path.join(home, "claude-prompts");
+    await writeConfigYaml(
+      paths,
+      `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n    prompts: ${claudePrompts}\n`
+    );
+    await installAllFromSource(repo, home);
+
+    const before = await loadState(paths);
+    expect(before.entries.map((entry) => entry.id).sort()).toEqual(["prompt:commit-message", "skill:review"]);
+    const exposurePaths = before.entries.flatMap((entry) => entry.exposures.map((exposure) => exposure.path));
+    expect(exposurePaths.length).toBeGreaterThan(0);
+    for (const exposurePath of exposurePaths) {
+      await expect(fs.access(exposurePath)).resolves.toBeUndefined();
+    }
+
+    // Empty the source entirely: no skills, no prompts.
+    await fs.rm(path.join(repo, "skills", "review"), { recursive: true, force: true });
+    await fs.rm(path.join(repo, "prompts", "commit-message.md"));
+
+    const { pruned } = await installAllFromSource(repo, home, undefined, undefined, { prune: true });
+
+    expect(pruned.map((entry) => entry.id).sort()).toEqual(["prompt:commit-message", "skill:review"]);
+
+    const state = await loadState(paths);
+    expect(state.entries).toEqual([]);
+    await expect(fs.access(path.join(paths.agentsSkillsDir, "review"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.access(path.join(paths.agentsPromptsDir, "commit-message.md"))).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+    for (const exposurePath of exposurePaths) {
+      await expect(fs.access(exposurePath)).rejects.toMatchObject({ code: "ENOENT" });
+    }
   });
 
   it("never prunes artifacts owned by a different source identity, even when the scanned source shares their names", async () => {
@@ -552,7 +643,7 @@ describe("exposure state reporting", () => {
     const home = await makeTempDir("agent-installer-home-");
 
     const artifacts = await scanSourceRepository(repo);
-    const { states } = await collectArtifactStates(artifacts, home);
+    const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
 
     expect(states).toHaveLength(2);
     for (const state of states) {
@@ -569,7 +660,7 @@ describe("exposure state reporting", () => {
     await writeConfigYaml(paths, `version: 1\ntargets:\n  claude:\n    skills: ${claudeSkills}\n`);
 
     const artifacts = await scanSourceRepository(repo);
-    const { states } = await collectArtifactStates(artifacts, home);
+    const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
 
     const review = states.find((state) => state.id === "skill:review");
     expect(review?.status).toBe("new");
@@ -588,7 +679,7 @@ describe("exposure state reporting", () => {
     await installAllFromSource(repo, home);
 
     const artifacts = await scanSourceRepository(repo);
-    const { states } = await collectArtifactStates(artifacts, home);
+    const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
 
     const review = states.find((state) => state.id === "skill:review");
     expect(review?.status).toBe("installed-same");
@@ -607,7 +698,7 @@ describe("exposure state reporting", () => {
     await fs.rm(path.join(claudeSkills, "review"));
 
     const artifacts = await scanSourceRepository(repo);
-    const { states } = await collectArtifactStates(artifacts, home);
+    const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
 
     const review = states.find((state) => state.id === "skill:review");
     expect(review?.status).toBe("installed-different");
@@ -632,7 +723,7 @@ describe("exposure state reporting", () => {
     await fs.writeFile(claudeExposure, "user-owned\n", "utf8");
 
     const artifacts = await scanSourceRepository(repo);
-    const { states } = await collectArtifactStates(artifacts, home);
+    const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
 
     const review = states.find((state) => state.id === "skill:review");
     expect(review?.status).toBe("installed-different");
@@ -655,7 +746,7 @@ describe("exposure state reporting", () => {
     const { exposurePath } = await installWithLegacyExposure(repo, home);
 
     const artifacts = await scanSourceRepository(repo);
-    const { states } = await collectArtifactStates(artifacts, home);
+    const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
 
     const review = states.find((state) => state.id === "skill:review");
     expect(review?.status).toBe("installed-same");
@@ -705,7 +796,7 @@ describe("legacy exposure preservation", () => {
 
     await fs.writeFile(path.join(repo, "skills", "review", "SKILL.md"), "# Review v2\n", "utf8");
     const artifacts = await scanSourceRepository(repo);
-    const { states } = await collectArtifactStates(artifacts, home);
+    const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
     expect(states.find((state) => state.id === "skill:review")?.status).toBe("installed-different");
 
     await installArtifacts(
@@ -1305,7 +1396,7 @@ describe("content hashing", () => {
     await fs.symlink(path.join(skillPath, "target.txt"), path.join(skillPath, "shortcut.txt"));
 
     const artifacts = await scanSourceRepository(repo);
-    await expect(collectArtifactStates(artifacts, home)).rejects.toThrow(/shortcut\.txt/);
+    await expect(collectArtifactStates(artifacts, home, await fs.realpath(repo))).rejects.toThrow(/shortcut\.txt/);
     await expect(installAll(repo, home)).rejects.toThrow(/shortcut\.txt/);
 
     const paths = resolveTargetPaths(home);

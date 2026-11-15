@@ -195,6 +195,28 @@ export interface SyncLegacyNotice {
 }
 
 /**
+ * What one exposure mutation step did for a single planned action: `created`
+ * (symlink created), `moved` (stale path replaced), `removed` (orphan deleted
+ * or already gone), `kept-foreign` (the path is no longer an owned symlink so
+ * it was left alone and its record retained), or `failed` (creation failed,
+ * with `reason`). Produced by the shared exposure mutation module and consumed
+ * by sync JSON (`applied` vs `skipped`) and uninstall/prune reporting.
+ */
+export type ExposureActionOutcomeStatus = "created" | "moved" | "removed" | "kept-foreign" | "failed";
+
+export interface ExposureActionOutcome {
+  id: string;
+  targetName: string | null;
+  kind: ExposureKind;
+  path: string;
+  /** Set for `moved` (the new path) and for a `kept-foreign`/`failed` move: the stale path. */
+  fromPath?: string;
+  outcome: ExposureActionOutcomeStatus;
+  /** Set for `kept-foreign` and `failed`. */
+  reason?: string;
+}
+
+/**
  * What one install run did to a single Requested Artifact's Base Store copy
  * only (never its Tool Exposures): `installed` (it was `new`), `updated`
  * (content rewritten), `unchanged` (verified, not written), `conflict` (a

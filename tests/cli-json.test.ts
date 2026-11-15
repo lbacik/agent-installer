@@ -208,6 +208,30 @@ describe("install --json", () => {
   });
 });
 
+describe("install --json --json-schema 3 source-wide validation", () => {
+  it("reports error code source-configuration when an unselected skill is defective", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    const badDir = path.join(repo, "skills", "bad");
+    await fs.mkdir(badDir, { recursive: true });
+    await fs.writeFile(path.join(badDir, "SKILL.md"), "# Bad\n", "utf8");
+    await fs.writeFile(path.join(badDir, "target.txt"), "content\n", "utf8");
+    await fs.symlink(path.join(badDir, "target.txt"), path.join(badDir, "shortcut.txt"));
+
+    const result = await runCli(["install", repo, "--only", "skill:review", "--json", "--json-schema", "3"], home);
+
+    expect(result.exitCode).not.toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as {
+      outcome?: string;
+      error?: { code?: string; message?: string };
+    };
+    expect(parsed.outcome).toBe("aborted");
+    expect(parsed.error?.code).toBe("source-configuration");
+    expect(parsed.error?.message).toMatch(/shortcut\.txt/);
+    await expect(fs.access(path.join(home, ".agents", "skills"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
 describe("list --json", () => {
   it("produces output non-interactively with no managed artifacts", async () => {
     const home = await makeTempDir("agent-installer-cli-home-");
@@ -418,6 +442,90 @@ describe("sync --json", () => {
     expect(parsed.planned.map((action) => action.id)).toEqual(["skill:review"]);
     expect(parsed.applied).toEqual([]);
     await expect(fs.access(path.join(skillsDir, "review"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("omits a failed create from applied and reports it exactly once in skipped with a reason", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    await runCli(["install", repo, "--all"], home);
+
+    // Block the target directory with a regular file so symlink creation fails.
+    const skillsDir = path.join(home, "claude-skills");
+    await fs.writeFile(skillsDir, "blocking file\n", "utf8");
+    await writeConfig(home, `version: 1\ntargets:\n  claude:\n    skills: ${skillsDir}\n`);
+
+    const result = await runCli(["sync", "--json"], home);
+
+    expect(result.exitCode).toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as {
+      planned: Array<{ id: string; action: string; path: string }>;
+      applied: Array<{ id: string; path: string }>;
+      skipped: Array<{ id: string; path: string; conflictReason: string }>;
+    };
+    expect(parsed.planned).toEqual([expect.objectContaining({ id: "skill:review", action: "create" })]);
+    expect(parsed.applied).toEqual([]);
+    expect(parsed.skipped).toHaveLength(1);
+    expect(parsed.skipped[0]).toMatchObject({ id: "skill:review", path: path.join(skillsDir, "review") });
+    expect(parsed.skipped[0]?.conflictReason).toMatch(/.+/);
+    expect(parsed.applied.map((action) => action.path)).not.toContain(path.join(skillsDir, "review"));
+  });
+
+  it("omits a foreign orphan removal from applied and reports it exactly once in skipped", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    const skillsDir = path.join(home, "claude-skills");
+    await writeConfig(home, `version: 1\ntargets:\n  claude:\n    skills: ${skillsDir}\n`);
+    await runCli(["install", repo, "--all"], home);
+
+    // The target is unconfigured (orphan), and a foreign file has replaced the link.
+    await fs.rm(path.join(home, ".agents", "agent-installer", "config.yaml"));
+    const orphanPath = path.join(skillsDir, "review");
+    await fs.rm(orphanPath);
+    await fs.writeFile(orphanPath, "not ours anymore\n", "utf8");
+
+    const result = await runCli(["sync", "--json"], home);
+
+    expect(result.exitCode).toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as {
+      planned: Array<{ id: string; action: string; path: string }>;
+      applied: Array<{ id: string; path: string }>;
+      skipped: Array<{ id: string; path: string; conflictReason: string }>;
+    };
+    expect(parsed.planned).toEqual([expect.objectContaining({ id: "skill:review", action: "remove" })]);
+    expect(parsed.applied).toEqual([]);
+    expect(parsed.skipped).toHaveLength(1);
+    expect(parsed.skipped[0]).toMatchObject({ id: "skill:review", path: orphanPath });
+  });
+
+  it("omits a move with a foreign stale path from applied and reports it exactly once in skipped", async () => {
+    const repo = await makeRepo();
+    const home = await makeTempDir("agent-installer-cli-home-");
+    const oldSkills = path.join(home, "old-skills");
+    await writeConfig(home, `version: 1\ntargets:\n  claude:\n    skills: ${oldSkills}\n`);
+    await runCli(["install", repo, "--only", "skill:review"], home);
+
+    // A foreign file replaces the stale path, then the target directory moves.
+    const stalePath = path.join(oldSkills, "review");
+    await fs.rm(stalePath);
+    await fs.writeFile(stalePath, "not ours anymore\n", "utf8");
+    const newSkills = path.join(home, "new-skills");
+    await writeConfig(home, `version: 1\ntargets:\n  claude:\n    skills: ${newSkills}\n`);
+
+    const result = await runCli(["sync", "--json"], home);
+
+    expect(result.exitCode).toBe(0);
+    const parsed = parseStdoutJson(result.stdout) as {
+      planned: Array<{ id: string; action: string; path: string; fromPath?: string }>;
+      applied: Array<{ id: string; path: string }>;
+      skipped: Array<{ id: string; path: string; conflictReason: string }>;
+    };
+    expect(parsed.planned).toEqual([
+      expect.objectContaining({ id: "skill:review", action: "move", fromPath: stalePath })
+    ]);
+    expect(parsed.applied).toEqual([]);
+    expect(parsed.skipped).toHaveLength(1);
+    expect(parsed.skipped[0]).toMatchObject({ id: "skill:review", path: stalePath });
+    await expect(fs.access(path.join(newSkills, "review"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("reports a conflict abort as a parseable error naming every conflicting pair", async () => {

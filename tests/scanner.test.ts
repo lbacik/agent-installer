@@ -134,7 +134,7 @@ describe("scan reporting pipeline", () => {
     );
 
     const artifacts = await scanSourceRepository(repo);
-    const { states } = await collectArtifactStates(artifacts, home);
+    const { states } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
 
     const review = states.find((state) => state.id === "skill:review");
     expect(review?.exposures.map((exposure) => exposure.targetName).sort()).toEqual(["claude", "team"]);
@@ -149,7 +149,7 @@ describe("scan reporting pipeline", () => {
     const home = await makeHome();
 
     const artifacts = await scanSourceRepository(repo);
-    const { states, removed } = await collectArtifactStates(artifacts, home);
+    const { states, removed } = await collectArtifactStates(artifacts, home, await fs.realpath(repo));
     const output = buildScanJson(states, removed);
 
     expect(output.schemaVersion).toBe(2);

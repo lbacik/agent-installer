@@ -8,12 +8,11 @@ import { runConfigInit } from "./config-init.js";
 import { loadConfig } from "./config.js";
 import { ConfigurationError, SourceConfigurationError, SourceUnavailableError } from "./errors.js";
 import {
-  collectExposureConflicts,
   InstallConflictError,
   installAllFromSource,
-  installArtifacts,
   removeArtifacts,
   runInstall,
+  runInstallFromStates,
   UnmatchedSelectorsError
 } from "./install.js";
 import {
@@ -46,10 +45,10 @@ import { resolveTargetPaths } from "./paths.js";
 import type { InstallErrorCode, InstallOutcome } from "./types.js";
 import { loadState } from "./state.js";
 import { runVerify } from "./verify.js";
-import { withResolvedArtifactStates } from "./source-workflow.js";
+import { withScannedSource } from "./source-workflow.js";
 import { SyncConflictError, syncExposures } from "./sync.js";
 import type { ScanSourceOptions } from "./source.js";
-import type { ArtifactState } from "./types.js";
+import type { ResolveSourceOptions } from "./source-resolver.js";
 
 interface ScanCommandOptions {
   skillMaxDepth?: number;
@@ -150,10 +149,6 @@ function abortedReportForError(home: string | undefined, error: unknown): Instal
   };
 }
 
-function toStateMap(states: ArtifactState[]): Map<string, ArtifactState> {
-  return new Map(states.map((state) => [state.id, state]));
-}
-
 function parsePositiveInteger(value: string, optionName: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 1) {
@@ -190,8 +185,40 @@ function readPackageVersion(): string {
   return packageJson.version;
 }
 
+function toResolveOptions(ref: string | undefined): ResolveSourceOptions | undefined {
+  return ref === undefined ? undefined : { ref };
+}
+
+function validateInstallSelection(all: boolean | undefined, only: string[]): void {
+  if (all === true && only.length > 0) {
+    throw new Error("--all and --only are mutually exclusive.");
+  }
+
+  if (all !== true && only.length === 0) {
+    throw new Error("Specify --all or --only <artifact-id> for non-interactive installation.");
+  }
+}
+
+function throwOrReportJson(json: boolean, error: unknown, report: unknown): void {
+  if (!json) {
+    throw error;
+  }
+
+  printJson(report);
+  process.exitCode = 1;
+}
+
+function countWritten(outcome: InstallOutcome): number {
+  return outcome.artifacts.filter(
+    (record) => record.disposition === "installed" || record.disposition === "updated"
+  ).length;
+}
+
 async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOptions, listLength?: number, ref?: string): Promise<void> {
-  await withResolvedArtifactStates(inputPath, undefined, scanOptions, ref === undefined ? undefined : { ref }, async ({ states, removed }) => {
+  await withScannedSource(
+    inputPath,
+    { scanOptions, resolveOptions: toResolveOptions(ref) },
+    async ({ states, removed, resolvedCommit }) => {
     printLines(collectLegacyNotices([...states, ...removed.map((entry) => entry.managedEntry)]));
     const selection = await promptForSelections(states, removed, {
       clearPromptOnDone: true,
@@ -202,32 +229,45 @@ async function runInteractive(inputPath?: string, scanOptions?: ScanSourceOption
       return;
     }
 
-    const stateMap = toStateMap(states);
-    const installTargets = selection.installIds.map((id) => {
-      const state = stateMap.get(id);
-      if (!state) {
-        throw new Error(`Unknown artifact id: ${id}`);
-      }
-
-      return state;
-    });
-
-    const installed = selection.installIds.length > 0 ? await installArtifacts(installTargets) : [];
+    // One decision path for both modes: the picker's selection goes through
+    // the same select -> partition -> gate -> apply module as --only, with
+    // the conflict policy fixed to allow (skip and report, never abort).
+    const installResult =
+      selection.installIds.length > 0
+        ? await runInstallFromStates(states, removed, {
+            allowConflicts: true,
+            only: selection.installIds,
+            resolvedCommit
+          })
+        : null;
     const { removed: removedEntries, skippedExposures } =
       selection.removeIds.length > 0 ? await removeArtifacts(selection.removeIds) : { removed: [], skippedExposures: [] };
 
+    const recordsById = new Map((installResult?.outcome.artifacts ?? []).map((record) => [record.id, record]));
     const operations = [
-      ...installTargets.map((state) => formatOperationLine(state.status === "new" ? "created" : "updated", state.id)),
+      ...selection.installIds.flatMap((id) => {
+        const disposition = recordsById.get(id)?.disposition;
+        if (disposition === "installed") {
+          return [formatOperationLine("created", id)];
+        }
+
+        if (disposition === "updated") {
+          return [formatOperationLine("updated", id)];
+        }
+
+        return [];
+      }),
       ...removedEntries.map((entry) => formatOperationLine("removed", entry.id))
     ];
     printLines(operations);
-    for (const conflict of collectExposureConflicts(installTargets)) {
+    for (const conflict of installResult?.exposureConflicts ?? []) {
       console.error(`skipped ${formatExposureConflictLine(conflict)}`);
     }
     for (const skipped of skippedExposures) {
       console.error(formatSkippedExposureLine(skipped));
     }
-    if (installed.length === 0 && removedEntries.length === 0) {
+    const written = installResult === null ? 0 : countWritten(installResult.outcome);
+    if (written === 0 && removedEntries.length === 0) {
       console.log("No changes applied.");
     }
   });
@@ -284,11 +324,12 @@ function createProgram(): Command {
       // Usage errors fail before any work starts, outside the JSON error wrapping below.
       parseJsonSchemaOption(options.jsonSchema, json, "scan");
       try {
-        await withResolvedArtifactStates(
+        await withScannedSource(
           inputPath,
-          undefined,
-          scanOptionsFromCommand(options),
-          options.ref === undefined ? undefined : { ref: options.ref },
+          {
+            scanOptions: scanOptionsFromCommand(options),
+            resolveOptions: toResolveOptions(options.ref)
+          },
           async ({ states, removed }) => {
             if (json) {
               printJson(buildScanJson(states, removed));
@@ -303,12 +344,7 @@ function createProgram(): Command {
           }
         );
       } catch (error) {
-        if (!json) {
-          throw error;
-        }
-
-        printJson(buildArtifactsErrorJson(error));
-        process.exitCode = 1;
+        throwOrReportJson(json, error, buildArtifactsErrorJson(error));
       }
     });
 
@@ -342,20 +378,14 @@ function createProgram(): Command {
         const json = options.json === true;
         const schema = parseJsonSchemaOption(options.jsonSchema, json, "install");
         if (schema === 3) {
-          if (options.all && options.only.length > 0) {
-            throw new Error("--all and --only are mutually exclusive.");
-          }
-
-          if (!options.all && options.only.length === 0) {
-            throw new Error("Use --all for non-interactive installation.");
-          }
+          validateInstallSelection(options.all, options.only);
 
           try {
             const only = options.only.length > 0 ? options.only : undefined;
             const result = await runInstall({
               sourcePath: inputPath,
               scanOptions: scanOptionsFromCommand(options),
-              resolveOptions: options.ref === undefined ? undefined : { ref: options.ref },
+              resolveOptions: toResolveOptions(options.ref),
               allowConflicts: options.allowConflicts === true,
               prune: options.prune === true,
               ...(only === undefined ? {} : { only })
@@ -374,20 +404,14 @@ function createProgram(): Command {
         }
 
         try {
+          validateInstallSelection(options.all, options.only);
           const only = options.only.length > 0 ? options.only : undefined;
-          if (options.all && only !== undefined) {
-            throw new Error("--all and --only are mutually exclusive.");
-          }
 
-          if (!options.all && only === undefined) {
-            throw new Error("Use --all for non-interactive installation.");
-          }
-
-          const { states, installed, conflicts, exposureConflicts, pruned, prunedSkippedExposures } = await installAllFromSource(
+          const { states, installed, conflicts, exposureConflicts, pruned, prunedSkippedExposures, outcome } = await installAllFromSource(
             inputPath,
             undefined,
             scanOptionsFromCommand(options),
-            options.ref === undefined ? undefined : { ref: options.ref },
+            toResolveOptions(options.ref),
             {
               allowConflicts: options.allowConflicts === true,
               prune: options.prune === true,
@@ -400,7 +424,7 @@ function createProgram(): Command {
             return;
           }
 
-          console.log(`installed/updated ${installed.length}`);
+          console.log(`installed/updated ${countWritten(outcome)}`);
           for (const state of conflicts) {
             console.error(`skipped ${formatConflictLine(state)}`);
           }
@@ -420,13 +444,8 @@ function createProgram(): Command {
             console.error(formatSkippedExposureLine(skipped));
           }
         } catch (error) {
-          if (!json) {
-            throw error;
-          }
-
           const refused = error instanceof InstallConflictError ? error.conflicts : [];
-          printJson(buildInstallErrorJson(error, refused));
-          process.exitCode = 1;
+          throwOrReportJson(json, error, buildInstallErrorJson(error, refused));
         }
       }
     );
@@ -502,24 +521,20 @@ function createProgram(): Command {
           console.log("No changes applied.");
         }
       } catch (error) {
-        if (!json) {
-          throw error;
-        }
-
-        printJson(buildArtifactsErrorJson(error));
-        process.exitCode = 1;
+        throwOrReportJson(json, error, buildArtifactsErrorJson(error));
       }
     });
 
   addJsonSchemaOption(
-    program
-      .command("sync")
+    addJsonOption(
+      program.command("sync"),
+      "Emit a machine-readable JSON report on stdout instead of human-readable output"
+    )
       .description("Reconcile installed artifacts' exposures against the current config.yaml, without touching sources or content.")
       .option("--only <artifact-id>", "Sync only this artifact id, for example skill:review (repeatable)", collectOnly, [])
       .option("--target <name>", "Sync only this config.yaml target name (repeatable)", collectOnly, [])
       .option("--allow-conflicts", "Sync the eligible pairs and skip conflicting ones instead of aborting")
       .option("--dry-run", "Print the planned actions without touching the filesystem or state")
-      .option("--json", "Emit a machine-readable JSON report on stdout instead of human-readable output")
   ).action(
       async (options: { only: string[]; target: string[]; allowConflicts?: boolean; dryRun?: boolean; json?: boolean; jsonSchema?: string }) => {
         const json = options.json === true;
@@ -545,7 +560,26 @@ function createProgram(): Command {
             console.log(`planned ${printable.length} change(s)`);
           }
 
-          printLines(printable.map(formatSyncActionLine));
+          // Human output must not claim an action succeeded when it did not:
+          // failed or kept-foreign actions never print as performed. Kept-foreign
+          // skips already report below via skippedOrphanRemovals; failures report here.
+          const unperformedKeys = new Set(
+            result.outcomes
+              .filter((outcome) => outcome.outcome === "failed" || outcome.outcome === "kept-foreign")
+              .map((outcome) => `${outcome.id}\n${outcome.path}`)
+          );
+          const performed = result.dryRun
+            ? printable
+            : printable.filter((action) => !unperformedKeys.has(`${action.id}\n${action.path}`));
+
+          printLines(performed.map(formatSyncActionLine));
+          for (const outcome of result.outcomes) {
+            if (outcome.outcome === "failed") {
+              console.error(
+                `failed ${outcome.id} -> ${outcome.targetName ?? "legacy"}:${outcome.path} (${outcome.reason ?? "Exposure creation failed."})`
+              );
+            }
+          }
           const conflictPrefix = result.dryRun ? "would skip" : "skipped";
           for (const conflict of conflicts) {
             console.error(`${conflictPrefix} ${formatSyncActionLine(conflict)}`);
@@ -560,15 +594,10 @@ function createProgram(): Command {
             console.log("Nothing to sync.");
           }
         } catch (error) {
-          if (!json) {
-            throw error;
-          }
-
           // A conflict abort changes nothing, so planned/applied stay empty and
           // every touched conflict lands in skipped.
           const skipped = error instanceof SyncConflictError ? error.conflicts.map(syncConflictToSkipped) : [];
-          printJson(buildSyncErrorJson(error, skipped));
-          process.exitCode = 1;
+          throwOrReportJson(json, error, buildSyncErrorJson(error, skipped));
         }
       }
     );

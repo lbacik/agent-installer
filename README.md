@@ -242,6 +242,12 @@ agent-installer install [path] --only skill:review --only prompt:commit-message
 Selection is applied to the reconciled set, so conflict handling behaves exactly as it does under `--all`, including
 `--allow-conflicts`. Unselected artifacts are left untouched.
 
+Source validation, by contrast, is source-wide: a source-configuration error in any discovered artifact (a symlink
+inside a skill directory, or authored `agents/openai.yaml` that cannot be merged for a skill declaring
+`disable-model-invocation: true`) aborts the whole run with a non-zero exit before anything is installed, even when
+the offending artifact is not selected. `--only` narrows what gets installed, not what gets validated; selecting
+differently cannot work around a defective source, the source itself must be fixed.
+
 Remove managed artifacts that the scanned source no longer offers (`source-missing`), so the base store ends up
 containing exactly what the source declares and nothing else:
 
@@ -562,7 +568,7 @@ alternative, is recorded in
 
 Prerequisites for a remote install during a build:
 
-- Node satisfying this package's `engines.node` requirement (`>=20`)
+- Node satisfying this package's `engines.node` requirement (`>=22.13.0`)
 - `git`
 - network access to the source repository
 - any HTTPS credentials the source repository needs (the installer uses the system `git` command and its existing
