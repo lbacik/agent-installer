@@ -568,7 +568,7 @@ alternative, is recorded in
 
 Prerequisites for a remote install during a build:
 
-- Node satisfying this package's `engines.node` requirement (`>=20`)
+- Node satisfying this package's `engines.node` requirement (`>=22.13.0`)
 - `git`
 - network access to the source repository
 - any HTTPS credentials the source repository needs (the installer uses the system `git` command and its existing
